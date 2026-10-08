@@ -21,12 +21,42 @@ Data flow per frame:
 ```
 audio::analyze ─► Features ─► Lua update(t, f) ─► SceneDesc ─► to_params(camera) ─► SceneParams ─► GPU
                                    (script.rs)      (scene.rs)                         (renderer.rs)
+                                        │
+                     Lua `glitch` state ─► SceneDesc.glitch (GlitchDesc)
+                                        └► glitch::resolve(t, Features, mean_luma[prev]) ─► GlitchParams ─► glitch UBO
 ```
+
+## The second contract: `GlitchParams` (src/glitch.rs ⇄ shaders/glitch_common.glsl)
+
+Separate from `SceneParams` because it belongs to a separate stage: the image-plane glitch
+chain, which runs on the HDR image after the particle pass and before the tonemap and never
+sees the 4D scene. 11 × vec4, std140, size asserted. Set by the caller on
+`Renderer::glitch` before each frame (default = everything bypassed).
+
+| field | meaning |
+|---|---|
+| `sync` | depth (fraction of a line), freq (bands/frame), speed (Hz), block (0..1) |
+| `ring` | depth, freq (carrier cycles/scanline), speed (Hz), chroma (rad) |
+| `smear` | depth, feedback a, direction ±1 |
+| `disp` | depth (px @1080p), mode (0 radial / 1 directional), angle |
+| `warp_ab`, `warp_cd` | Möbius a, b, c, d (complex), already blended with identity by amount |
+| `warp_m` | amount (0 = bypass), zoom |
+| `spec`, `spec2` | mix, band lo/hi, atten · ghost phase, seed, softness, gain outside |
+| `crush` | depth (levels), hold (px) |
+| `misc` | time, mean luminance of the previous frame, frame index |
+
+Patch-bay resolution (`glitch::resolve_values`): `base + Σ(gain·src + offset)`, clamped per
+parameter (`glitch::PARAMS` lists names, defaults and ranges). Glitch descriptor set (its own
+layout, compute only): 0 `Glitch` UBO · 1 `src` image · 2 `dst` image · 3/4 FFT buffers A/B
+(1024×512 × 32 B) · 5 `Stats` (host-visible, mean luminance). Two sets swap 1↔2 for ping-pong
+between the HDR image and the target's `scratch` image; the tonemap reads whichever holds the
+result.
 
 GPU buffers (set 0): binding 0 `Scene` UBO · binding 1 `Seeds` (vec4 per particle, fixed
 cloud) · binding 2 `Droplets` (compute writes pos/size, normal/d, emission/visibility;
 vertex reads). Frame = field.comp dispatch → buffer barrier → billboard draw (6 verts ×
-N instances, additive, no depth) → readback (render) or present (run).
+N instances, additive, no depth) → stats + active glitch passes (compute, HDR ⇄ scratch) →
+tonemap → readback (render) or present (run).
 
 ## Lua scene table (returned from `update(t, f)`)
 
@@ -40,6 +70,9 @@ N instances, additive, no depth) → readback (render) or present (run).
   reflectivity=0.6, exposure=1, camera={eye={..}, target={..}, fov=deg} -- camera optional }
 ```
 `f` = `{bass, mid, high, onset, rms, beat_phase}`. Script errors keep the last good scene.
+The prelude also installs the `glitch` patch bay (`set / patch / unpatch / lfo / source /
+clear`, see README); its state lives in Lua tables (`glitch._set/_patch/_lfo/_src`) that
+`script::parse_glitch` reads after every `update`.
 
 ## File ownership
 
@@ -50,10 +83,14 @@ N instances, additive, no depth) → readback (render) or present (run).
 | `src/math4d.rs` | Affine4 (A, t), Plane (6 rotation planes), rotation/shear/scale/translate/compose/inverse |
 | `src/field.rs` | Shape / Op / Prim / Field; CPU SDF eval (tests); pack to GpuPrimitive |
 | `src/audio.rs` | original procedural track → WAV (hound); STFT analysis → Features per frame (realfft) |
-| `src/script.rs` | ScriptHost: mlua state, `hyper` helpers, notify hot reload, table → SceneDesc |
+| `src/script.rs` | ScriptHost: mlua state, `hyper` + `glitch` helpers, notify hot reload, table → SceneDesc |
+| `src/glitch.rs` | **glitch contract**: GlitchParams, PARAMS table, GlitchDesc/Patch/Lfo, `resolve`; CPU references (Möbius, IIR, Stockham FFT, gate) + tests |
+| `src/gpu/glitch.rs` | GlitchPass: glitch descriptor sets (ping-pong), pipelines, FFT/stat buffers, chain recording |
+| `shaders/glitch_common.glsl` | GLSL mirror of GlitchParams, image/buffer bindings, bilinear helper |
+| `shaders/glitch_*.comp` | sync, ring, smear, disp, warp, spectral (load/stage/filter/composite), crush, stats |
 | `src/gpu/context.rs` | instance/device on MoltenVK (portability), queue, memory types, one-shot submit |
 | `src/gpu/buffers.rs` | Buffer / Image allocation helpers |
-| `src/gpu/target.rs` | Offscreen (RGBA8 + readback) and Swapchain targets |
+| `src/gpu/target.rs` | Offscreen (RGBA8 + readback) and Swapchain targets, each with HDR + scratch images |
 | `src/gpu/passes.rs` | descriptor bindings, FieldPass (compute), ParticlePass (dynamic rendering) |
 | `src/gpu/renderer.rs` | Renderer: resources + frame recording, `render_offscreen` / `render_present` |
 | `shaders/field.comp` | per-particle 4D field eval, gradient normal, blackbody emission |
