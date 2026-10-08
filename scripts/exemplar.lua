@@ -50,8 +50,9 @@ function update(t, f)
   -- slice sweep: 9 s triangle over +-1.05 so it only grazes the edge. Phase-shifted so frame 0
   -- is already at w~-0.7 (a shape being born). The single near-empty "drop" is the bass hit
   -- jump at the +1.05 end, which pushes the slice briefly past the edge.
-  local sweep = H.lerp(-1.05, 1.05, H.ease(H.tri(t + 1.6, 9)))
-  local w_slice = sweep + jump + 0.05 * math.sin(t * 1.7) * f.rms
+  local sweep = H.lerp(-0.95, 0.95, H.ease(H.tri(t + 1.6, 9)))
+  -- clamp so a bass jump never carries the slice fully past the shape (was blanking ~12s/~30s)
+  local w_slice = math.max(-0.97, math.min(0.97, sweep + jump + 0.05 * math.sin(t * 1.7) * f.rms))
 
   local cliff_w = 0.4 * math.sin(t * 0.31)
 
