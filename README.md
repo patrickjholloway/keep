@@ -24,7 +24,7 @@ mise exec -- ./target/release/keep render scripts/exemplar.lua \
     --seconds 75 --fps 60 --size 1920x1080 --out out/keep-exemplar.mp4 [--audio a.wav] [--particles 750000]
 ```
 
-The exemplar (75 s, 1080p60, ~60 s to render on an M5 Pro, glitch chain included) is at `renders/keep-exemplar.mp4`
+The exemplar (75 s, 1080p60, ~95 s to render on an M5 Pro, glitch chain included) is at `renders/keep-exemplar.mp4`
 (not committed); stills are in `renders/stills/`.
 
 ## Controls (`keep run`)
