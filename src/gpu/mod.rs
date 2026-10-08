@@ -19,3 +19,7 @@ pub mod target;
 
 pub use context::GpuContext;
 pub use renderer::Renderer;
+pub mod png;
+
+#[cfg(test)]
+mod tests;

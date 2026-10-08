@@ -21,6 +21,8 @@ fn main() {
         ("field.comp", naga::ShaderStage::Compute),
         ("particle.vert", naga::ShaderStage::Vertex),
         ("particle.frag", naga::ShaderStage::Fragment),
+        ("tonemap.vert", naga::ShaderStage::Vertex),
+        ("tonemap.frag", naga::ShaderStage::Fragment),
     ] {
         let src = inline_includes(&fs::read_to_string(dir.join(file)).unwrap(), dir);
         let module = naga::front::glsl::Frontend::default()

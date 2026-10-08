@@ -7,3 +7,5 @@ pub const PARTICLE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/parti
 pub fn words(spv: &[u8]) -> Vec<u32> {
     spv.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
+pub const TONEMAP_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.vert.spv"));
+pub const TONEMAP_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.frag.spv"));
