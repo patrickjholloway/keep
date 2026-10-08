@@ -1,6 +1,6 @@
 //! keep — 4D implicit-field slice renderer.
 //!
-//!   keep run    scripts/scene.lua
+//!   keep run    scripts/scene.lua [--frames N]   (N = exit after N frames; smoke test)
 //!   keep render scripts/scene.lua --audio out.wav --seconds N --fps 30 --size 1920x1080 --out out.mp4 [--particles N]
 //!   keep probe                       (list Vulkan devices; smoke test)
 //!
@@ -24,7 +24,15 @@ use ash::vk;
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("run") => app::run(&PathBuf::from(args.get(1).context("usage: keep run <scene.lua>")?)),
+        Some("run") => {
+            let script = PathBuf::from(args.get(1).context("usage: keep run <scene.lua> [--frames N]")?);
+            let frames = match args.get(2).map(String::as_str) {
+                Some("--frames") => Some(args.get(3).context("--frames N")?.parse()?),
+                Some(f) => bail!("unknown flag {f}"),
+                None => None,
+            };
+            app::run(&script, frames)
+        }
         Some("render") => offline::render(&parse_render(&args[1..])?),
         Some("probe") => probe(),
         _ => bail!("usage: keep run <scene.lua> | keep render <scene.lua> --audio a.wav --seconds N --fps 30 --size WxH --out out.mp4 | keep probe"),
@@ -34,14 +42,14 @@ fn main() -> anyhow::Result<()> {
 fn parse_render(a: &[String]) -> anyhow::Result<offline::RenderArgs> {
     let script = PathBuf::from(a.first().context("render: missing script path")?);
     let mut r = offline::RenderArgs {
-        script, audio: "out.wav".into(), seconds: 30.0, fps: 30, width: 1920, height: 1080,
+        script, audio: None, seconds: 30.0, fps: 30, width: 1920, height: 1080,
         out: "out.mp4".into(), particles: 2_000_000,
     };
     let mut it = a[1..].iter();
     while let Some(flag) = it.next() {
         let v = it.next().with_context(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
-            "--audio" => r.audio = v.into(),
+            "--audio" => r.audio = Some(v.into()),
             "--seconds" => r.seconds = v.parse()?,
             "--fps" => r.fps = v.parse()?,
             "--out" => r.out = v.into(),
