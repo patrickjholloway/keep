@@ -89,5 +89,35 @@ mod tests {
             .compose(&Affine4::translation(Vec4::new(1.0, 2.0, 3.0, 4.0)));
         let p = Vec4::new(0.3, -1.0, 2.0, 0.5);
         assert!((m.inverse().apply(m.apply(p)) - p).length() < 1e-5);
+        assert!((m.compose(&m.inverse()).apply(p) - p).length() < 1e-5);
+    }
+
+    #[test]
+    fn rotations_are_orthogonal() {
+        for plane in [Plane::XY, Plane::XZ, Plane::XW, Plane::YZ, Plane::YW, Plane::ZW] {
+            let r = Affine4::rotation(plane, 1.1).a;
+            assert!((r.transpose() * r).abs_diff_eq(Mat4::IDENTITY, 1e-5), "{plane:?}");
+            assert!((r.determinant() - 1.0).abs() < 1e-5);
+            // Only the plane's two axes move; the other two are fixed.
+            let (i, j) = plane.axes();
+            for k in (0..4).filter(|&k| k != i && k != j) {
+                let mut e = Vec4::ZERO; e[k] = 1.0;
+                assert!((r * e - e).length() < 1e-6);
+            }
+        }
+        // XW by 90° sends x to w.
+        let r = Affine4::rotation(Plane::XW, std::f32::consts::FRAC_PI_2);
+        assert!((r.apply(Vec4::X) - Vec4::W).length() < 1e-6);
+    }
+
+    #[test]
+    fn compose_order_and_primitives() {
+        let t = Affine4::translation(Vec4::new(1.0, 0.0, 0.0, 0.0));
+        let s = Affine4::scale(Vec4::splat(2.0));
+        // s∘t: translate first, then scale: (0 + 1) * 2 = 2
+        assert!((s.compose(&t).apply(Vec4::ZERO) - Vec4::new(2.0, 0.0, 0.0, 0.0)).length() < 1e-6);
+        // shear w += 0.5 x
+        let sh = Affine4::shear(3, 0, 0.5);
+        assert!((sh.apply(Vec4::new(2.0, 0.0, 0.0, 0.0)) - Vec4::new(2.0, 0.0, 0.0, 1.0)).length() < 1e-6);
     }
 }
