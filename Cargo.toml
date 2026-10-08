@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ash = "0.38"
+ash = { version = "0.38", features = ["loaded"] }
 ash-window = "0.13"
 winit = "0.30"
 raw-window-handle = "0.6"

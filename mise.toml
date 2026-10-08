@@ -1,0 +1,7 @@
+[tools]
+rust = { version = "1.90", components = "rustfmt,clippy" }
+"github:KhronosGroup/MoltenVK" = { version = "1.4.2", asset_pattern = "MoltenVK-macos.tar" }
+
+[env]
+# ash loads MoltenVK directly as the Vulkan implementation (no system loader needed).
+KEEP_VULKAN_LIB = "{{ env.HOME }}/.local/share/mise/installs/github-khronos-group-molten-vk/1.4.2/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib"
