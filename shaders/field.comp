@@ -49,8 +49,24 @@ void main() {
     Droplet o;
     o.pos_size = vec4(s.xyz, vis > 0.0 ? scene.slice.z * (0.6 + 0.4 * vis) : 0.0);
     o.normal_d = vec4(n, d);
+    // --- Colour: saturated blackbody ---------------------------------------------------------
+    // The raw Helland fit is pastel (every channel > 0.3 across most of the range). We:
+    //   1. pin the cold end (~1000-1800K) to a deep red-orange,
+    //   2. pin the hot end toward blue-white instead of neutral white,
+    //   3. push saturation away from grey by 1.8x (mix(grey, col, 1.8) extrapolates past col).
+    vec3 bb = blackbody(temp);
+    bb = mix(vec3(1.0, 0.25, 0.05), bb, smoothstep(1000.0, 1800.0, temp));
+    bb = mix(bb, vec3(0.55, 0.75, 1.0), smoothstep(6500.0, 12000.0, temp));
+    float bl = dot(bb, vec3(0.2126, 0.7152, 0.0722));
+    bb = max(mix(vec3(bl), bb, 1.8), 0.0);
+    // w-slope accent, scaled by 0.6 so cyan/magenta tints rather than dragging toward pink.
     vec3 accent = wslope > 0.0 ? vec3(0.05, 0.85, 1.0) : vec3(1.0, 0.1, 0.75);   // cyan / magenta
-    vec3 col = mix(blackbody(temp), accent, 0.55 * abs(wslope));
+    vec3 col = mix(bb, accent, 0.6 * 0.55 * abs(wslope));
+    // Edge-on term: where the surface normal is perpendicular to the view ray we are looking
+    // along the surface, so silhouettes, outlines and pinch-off necks get brighter.
+    vec3 vdir = normalize(scene.cam_pos.xyz - s.xyz);
+    float edge = 1.0 - abs(dot(n, vdir));
+    col *= 0.75 + 0.9 * edge * edge * edge;
     o.emission = vec4(col * scene.material.w, vis);
     droplets[id] = o;
 }

@@ -75,7 +75,7 @@ pub struct Renderer {
     pub field_pass: FieldPass,
     pub particle_pass: ParticlePass,
     pub tonemap: TonemapPass,
-    /// Tonemap knobs: x = exposure, y = vignette, z = time, w = bass (z/w overwritten per frame). Free to tweak between frames.
+    /// Tonemap knobs: x = exposure, y = onset, z = time, w = bass (y/z/w overwritten per frame). Free to tweak x between frames.
     pub tonemap_knobs: [f32; 4],
     pub pool: vk::CommandPool,
     pub cmd: vk::CommandBuffer,
@@ -115,7 +115,7 @@ impl Renderer {
         };
         Ok(Renderer {
             ctx, cloud, scene_ubo, seeds, droplets, bindings, field_pass, particle_pass, tonemap,
-            tonemap_knobs: [1.0, 0.35, 0.0, 0.0], pool, cmd, frame_fence, image_available,
+            tonemap_knobs: [1.0, 0.0, 0.0, 0.0], pool, cmd, frame_fence, image_available,
             tonemap_input: vk::ImageView::null(),
         })
     }
@@ -156,6 +156,7 @@ impl Renderer {
         self.scene_ubo.write(std::slice::from_ref(&p));
         // Tonemap knobs z/w are per-frame: z = time (seeds film grain), w = bass (tints the
         // background glow). x/y (exposure, vignette) stay whatever the caller set.
+        self.tonemap_knobs[1] = p.audio[3];   // onset envelope drives the short beat ring
         self.tonemap_knobs[2] = p.slice[3];
         self.tonemap_knobs[3] = p.audio[0];
         unsafe {

@@ -206,7 +206,7 @@ impl ParticlePass {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TonemapPush {
-    /// x = exposure multiplier, y = vignette strength, zw unused.
+    /// x = exposure multiplier, y = onset (beat ring), z = time (grain), w = bass (glow tint).
     pub knobs: [f32; 4],
 }
 

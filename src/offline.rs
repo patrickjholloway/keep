@@ -24,7 +24,7 @@ pub struct RenderArgs {
 
 /// Camera used when the script returns none: a fixed three-quarter view of the cloud.
 pub fn default_camera() -> Camera {
-    Camera { eye: Vec3::new(0.0, 0.8, 4.2), target: Vec3::ZERO, fov_y: 48f32.to_radians() }
+    Camera { eye: Vec3::new(0.0, 0.8, 4.2), target: Vec3::ZERO, fov_y: 48f32.to_radians(), roll: 0.0 }
 }
 
 pub fn render(args: &RenderArgs) -> anyhow::Result<()> {

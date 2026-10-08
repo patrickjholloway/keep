@@ -5,7 +5,7 @@
 // The HDR image is read as a storage image (imageLoad), so "blur" here is a sparse gather of
 // explicit texel loads rather than filtered sampling.
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D hdr;
-layout(push_constant) uniform Push { vec4 knobs; } pc;   // x = exposure, y = vignette, z = time, w = bass
+layout(push_constant) uniform Push { vec4 knobs; } pc;   // x = exposure, y = onset, z = time, w = bass
 layout(location = 0) out vec4 o_color;
 
 // ACES filmic fit (Narkowicz). Applied to LUMINANCE only, below, so it can't bleach hue.
@@ -47,15 +47,25 @@ void main() {
     ivec2 px = ivec2(gl_FragCoord.xy);
     ivec2 size = imageSize(hdr);
     vec2 uv = gl_FragCoord.xy / vec2(size);
-    vec3 c = imageLoad(hdr, px).rgb + 0.15 * 4.0 * bloom(px, size);   // 4x: the gather averages mostly-dark taps
+    vec3 c = imageLoad(hdr, px).rgb + 0.09 * 4.0 * bloom(px, size);   // 4x: the gather averages mostly-dark taps
 
-    // Faint radial background glow tinted by the low band (deep red-violet, warmer with bass).
+    // Faint radial background glow: indigo, only slightly warmer with bass, at 0.35x strength so
+    // it never becomes a flat maroon wash.
     float rd = length((uv - 0.5) * vec2(float(size.x) / float(size.y), 1.0));
-    vec3 lowcol = mix(vec3(0.04, 0.01, 0.06), vec3(0.12, 0.02, 0.04), clamp(pc.knobs.w, 0.0, 1.0));
-    c += lowcol * exp(-rd * rd * 3.0);
+    float bass = clamp(pc.knobs.w, 0.0, 1.0);
+    vec3 lowcol = mix(vec3(0.06, 0.04, 0.14), vec3(0.09, 0.04, 0.12), bass);
+    c += 0.35 * lowcol * exp(-rd * rd * 3.0);
+    // Beat ring: a thin expanding ring that lives ~150 ms after each kick. knobs.w carries the
+    // onset envelope (a fast-decaying spike, ~150 ms); we treat (1 - onset) as "time since the
+    // hit" so the ring expands outward while it fades. Zero between hits — no sustained glow.
+    float onset = clamp(pc.knobs.y, 0.0, 1.0);
+    float age = 1.0 - onset;                                 // 0 at the hit
+    float ringr = 0.25 + 0.45 * age;
+    float ring = exp(-pow((rd - ringr) / 0.025, 2.0)) * smoothstep(0.3, 1.0, onset);
+    c += ring * vec3(0.10, 0.12, 0.30);
 
     c *= pc.knobs.x;
-    float vig = 1.0 - pc.knobs.y * dot(uv - 0.5, uv - 0.5) * 2.0;
+    float vig = 1.0 - 0.35 * dot(uv - 0.5, uv - 0.5) * 2.0;
     c *= vig;
 
     // Saturation-preserving tonemap: compress luminance, keep the RGB ratios. A gentle
@@ -63,7 +73,7 @@ void main() {
     float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
     float Lt = aces(L);
     vec3 m = c * (Lt / max(L, 1e-5));
-    m = mix(m, vec3(Lt), smoothstep(0.85, 1.0, Lt) * 0.5);
+    m = mix(m, vec3(Lt), smoothstep(0.85, 1.0, Lt) * 0.3);
     m = clamp(m, 0.0, 1.0);
 
     // Colour grade: lift shadows toward teal, a touch of contrast.
@@ -73,6 +83,6 @@ void main() {
     m = clamp(m, 0.0, 1.0);
 
     vec3 s = to_srgb(m);
-    s += (hash12(gl_FragCoord.xy + fract(pc.knobs.z * 7.13) * 431.0) - 0.5) * (3.0 / 255.0);   // grain/dither
+    s += (hash12(gl_FragCoord.xy + fract(pc.knobs.z * 7.13) * 431.0) - 0.5) * (1.5 / 255.0);   // grain/dither
     o_color = vec4(s, 1.0);
 }

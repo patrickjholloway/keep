@@ -58,6 +58,8 @@ pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
     pub fov_y: f32,
+    /// Roll (radians) about the view axis: tilts the camera's "up" vector.
+    pub roll: f32,
 }
 
 /// What Lua's `update(t, features)` returns, in Rust types. Friendly to build, then packed.
@@ -82,7 +84,10 @@ impl SceneDesc {
         let inv = self.object.inverse();
         let mut prims = [GpuPrimitive::default(); MAX_PRIMS];
         let n = self.field.pack(&mut prims);
-        let view = Mat4::look_at_rh(camera.eye, camera.target, Vec3::Y);
+        // Roll = rotate the world-up vector about the viewing direction before building the view.
+        let fwd = (camera.target - camera.eye).normalize_or_zero();
+        let up = glam::Quat::from_axis_angle(fwd, camera.roll) * Vec3::Y;
+        let view = Mat4::look_at_rh(camera.eye, camera.target, up);
         // Vulkan clip space: y down, z in [0,1]. perspective_rh already gives [0,1] depth; flip y.
         let mut proj = Mat4::perspective_rh(camera.fov_y, aspect, 0.01, 100.0);
         proj.y_axis.y *= -1.0;

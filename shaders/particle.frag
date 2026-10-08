@@ -21,6 +21,10 @@ vec3 sky(vec3 dir) {
 void main() {
     float r2 = dot(v_uv, v_uv);
     if (r2 > 1.0) discard;                                  // outside the sphere's silhouette
+    // Hard, anti-aliased edge: fwidth(r) is how much r changes across one pixel, so this
+    // smoothstep fades over exactly ~1 px at the rim — crisp sphere, no fuzzy blob.
+    float r = sqrt(r2);
+    float aa = 1.0 - smoothstep(1.0 - fwidth(r), 1.0, r);
     vec3 right = vec3(scene.view[0][0], scene.view[1][0], scene.view[2][0]);
     vec3 up    = vec3(scene.view[0][1], scene.view[1][1], scene.view[2][1]);
     vec3 fwd   = normalize(scene.cam_pos.xyz - v_center);  // droplet -> eye
@@ -36,6 +40,10 @@ void main() {
     vec3 l = normalize(vec3(0.4, 0.8, 0.5));
     vec3 h = normalize(l + fwd);
     float spec = pow(max(dot(n, h), 0.0), 220.0) * scene.material.z * 2.5;
+    // Guaranteed pinpoint: a tiny bright dot near the sphere centre offset toward the light, so
+    // every bead shows one highlight even when the true glint misses it.
+    vec2 pp = v_uv - 0.35 * vec2(dot(l, right), dot(l, up));
+    spec = max(spec, 0.6 * exp(-dot(pp, pp) * 60.0));
     col += spec * mix(vec3(1.0), hue, 0.5);
 
     // Environment reflection (Fresnel weighted) + faint rim.
@@ -43,5 +51,10 @@ void main() {
     float fres = pow(1.0 - ndv, 4.0);
     col += sky(refl) * scene.material.z * (0.04 + 0.3 * fres);
     col += hue * 0.08 * fres;
-    o_color = vec4(col * v_vis, 1.0);                       // additive blend in the pipeline
+    // Depth fade: droplets on the far side of the object (relative to the camera) are 40% dimmer,
+    // so the back wall no longer speckles through the front surface. The field is centred at
+    // the origin, so sign(dot(center, cam)) tells front vs back hemisphere.
+    float side = dot(normalize(v_center + 1e-6), normalize(scene.cam_pos.xyz));
+    float depth = mix(0.6, 1.0, smoothstep(-0.3, 0.3, side));
+    o_color = vec4(col * v_vis * depth * aa, 1.0);                       // additive blend in the pipeline
 }

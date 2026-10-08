@@ -247,6 +247,7 @@ pub fn parse_scene(t: &Table) -> anyhow::Result<SceneDesc> {
             eye: parse_vec3(&c, "eye")?.unwrap_or(Vec3::new(0.0, 0.0, 6.0)),
             target: parse_vec3(&c, "target")?.unwrap_or(Vec3::ZERO),
             fov_y: num(&c, "fov", 50.0)?.to_radians(),
+            roll: num(&c, "roll", 0.0)?,
         }),
         None => None,
     };

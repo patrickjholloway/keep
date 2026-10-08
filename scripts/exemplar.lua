@@ -21,6 +21,7 @@ local function section(t) return H.ease(H.tri(t + 4, 32)) end
 
 -- State kept across frames (offline rendering calls update() in frame order).
 local jump_target, jump, last_onset, last_t = 0, 0, 0, 0
+local push_t, last_push = -10, 0
 
 function update(t, f)
   local energy = section(t)
@@ -41,8 +42,10 @@ function update(t, f)
   local zw = t * 0.26 + 0.35 * kick
   local yz = t * 0.015
 
-  -- slice sweep: 9 s triangle over +-1.3 so it fully leaves the object at both ends
-  local sweep = H.lerp(-1.3, 1.3, H.ease(H.tri(t, 9)))
+  -- slice sweep: 9 s triangle over +-1.05 so it only grazes the edge. Phase-shifted so frame 0
+  -- is already at w~-0.7 (a shape being born). The single near-empty "drop" is the bass hit
+  -- jump at the +1.05 end, which pushes the slice briefly past the edge.
+  local sweep = H.lerp(-1.05, 1.05, H.ease(H.tri(t + 1.6, 9)))
   local w_slice = sweep + jump + 0.05 * math.sin(t * 1.7) * f.rms
 
   local cliff_w = 0.4 * math.sin(t * 0.31)
@@ -68,10 +71,18 @@ function update(t, f)
   local cold = 1200
   local hot = 12500 + 8000 * f.onset + 3000 * f.high
 
-  -- camera: close, one orbit per ~25 s, push-in on onsets
+  -- camera: one orbit per ~25 s. Distance follows the cross-section's size: |w_slice| near 0
+  -- is the fattest slice, near +-1 the smallest. Clamped to 3.0..3.8 for consistent framing.
+  if f.onset > 0.5 and last_push <= 0.5 then push_t = t end
+  last_push = f.onset
+  local slice_extent = math.max(0, 1 - (w_slice / 1.05) ^ 2)        -- ~0..1
+  local dist = math.min(3.8, math.max(3.0, 2.6 + 0.8 * slice_extent + 0.5))
+  -- onset push: quick 0.3 dolly, eased out over 0.4 s
+  local pa = math.min(math.max((t - push_t) / 0.4, 0), 1)
+  dist = dist - 0.3 * (1 - pa) ^ 3
   local orbit = t * H.tau / 25
-  local dist = 3.4 - 0.5 * energy - 0.35 * f.onset
   local eye = { dist * math.sin(orbit), 0.9 * math.sin(t * 0.21), dist * math.cos(orbit) }
+  local roll = math.rad(8) * math.sin(t * 0.4)                     -- slow +-8 degree roll
 
   local field = {
     H.duocylinder { r1 = 0.8, r2 = 0.45 + 0.1 * energy },
@@ -94,12 +105,12 @@ function update(t, f)
     },
     field = field,
     w_slice         = w_slice,
-    surface_width   = 0.012 + 0.05 * f.bass,
-    particle_radius = 0.011 * (1 + 0.4 * f.onset),
+    surface_width   = 0.012 + 0.022 * f.bass,   -- thin shell: a thick one stacks into a white blob
+    particle_radius = 0.014 * (1 + 0.4 * f.onset),
     temperature     = { cold, hot },
     reflectivity    = 0.6 + 0.3 * f.high,
-    exposure        = 0.9 + 0.4 * energy + 0.8 * f.onset,
+    exposure        = (0.9 + 0.4 * energy) * (1 - 0.35 * f.bass) + 0.35 * f.onset,
     -- the field is centred at the origin (all prims orbit it), so the origin is its centre of mass
-    camera          = { eye = eye, target = { 0, 0, 0 }, fov = 46 - 4 * energy },
+    camera          = { eye = eye, target = { 0, 0, 0 }, fov = 46 - 4 * energy, roll = roll },
   }
 end

@@ -34,6 +34,6 @@ impl FlyCamera {
         self.pitch = (self.pitch - dy * 0.003).clamp(-1.55, 1.55);
     }
     pub fn camera(&self) -> Camera {
-        Camera { eye: self.pos, target: self.pos + self.forward(), fov_y: self.fov_y }
+        Camera { eye: self.pos, target: self.pos + self.forward(), fov_y: self.fov_y, roll: 0.0 }
     }
 }
