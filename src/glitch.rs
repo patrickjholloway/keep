@@ -91,6 +91,7 @@ pub const PARAMS: &[(&str, f32, f32, f32)] = &[
     ("smear.depth", 0.0, 0.0, 1.0),
     ("smear.feedback", 0.95, 0.0, 0.999),
     ("smear.dir", 1.0, -1.0, 1.0),
+    ("smear.axis", 0.0, 0.0, 1.0),
     ("dispersion.depth", 0.0, 0.0, 200.0),
     ("dispersion.mode", 0.0, 0.0, 1.0),
     ("dispersion.angle", 0.0, -100.0, 100.0),
@@ -285,7 +286,7 @@ pub fn resolve(desc: &GlitchDesc, t: f32, f: &Features, mean_luma: f32, frame: u
     GlitchParams {
         sync: [g("sync.depth"), g("sync.freq"), g("sync.speed"), g("sync.block")],
         ring: [g("ring.depth"), g("ring.freq"), g("ring.speed"), g("ring.chroma")],
-        smear: [g("smear.depth"), g("smear.feedback"), if g("smear.dir") < 0.0 { -1.0 } else { 1.0 }, 0.0],
+        smear: [g("smear.depth"), g("smear.feedback"), if g("smear.dir") < 0.0 { -1.0 } else { 1.0 }, if g("smear.axis") >= 0.5 { 1.0 } else { 0.0 }],
         disp: [g("dispersion.depth"), g("dispersion.mode").round(), g("dispersion.angle"), 0.0],
         warp_ab: [m[0].0, m[0].1, m[1].0, m[1].1],
         warp_cd: [m[2].0, m[2].1, m[3].0, m[3].1],
@@ -422,7 +423,7 @@ pub fn smear_run(x: &[f32], a: f32, depth: f32) -> Vec<f32> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn crush_quantize(c: f32, levels: f32) -> f32 {
     let v = c / (1.0 + c);
-    let v = ((v * levels).floor().min(levels - 1.0) + 0.5) / levels;
+    let v = ((v * (levels - 1.0)).round() / (levels - 1.0)).min((levels - 0.5) / levels);
     v / (1.0 - v)
 }
 
@@ -601,10 +602,16 @@ mod tests {
 
     #[test]
     fn crush_top_band_stays_proportionate() {
-        // L = 2: top band (v >= 0.5, c >= 1) -> v = 0.75 -> c = 3, not 49
+        // L = 2: top level (v >= 0.5, c >= 1) clamps to v = 0.75 -> c = 3, not infinity
         assert!(close(crush_quantize(3.0, 2.0), 3.0, 1e-4));
         assert!(close(crush_quantize(1000.0, 2.0), 3.0, 1e-3));
-        assert!(close(crush_quantize(0.2, 2.0), 1.0 / 3.0, 1e-4));
+        // black stays black at every level count (mid-tread), dim values snap down to 0
+        for &l in &[2.0f32, 4.0, 6.7, 256.0] {
+            assert_eq!(crush_quantize(0.0, l), 0.0);
+        }
+        assert_eq!(crush_quantize(0.2, 2.0), 0.0);
+        // L = 4: levels v = 0, 1/3, 2/3 -> c = 0, 0.5, 2
+        assert!(close(crush_quantize(0.45, 4.0), 0.5, 1e-4));
         // fine quantization is close to the identity
         for &c in &[0.05f32, 0.5, 2.0] {
             assert!((crush_quantize(c, 256.0) - c).abs() < 0.02 * (1.0 + c) * (1.0 + c));

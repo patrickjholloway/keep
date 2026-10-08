@@ -167,9 +167,9 @@ impl GlitchPass {
         if p.sync_on() { image_pass(self.sync, &mut dir); }
         if p.ring_on() { image_pass(self.ring, &mut dir); }
         if p.smear_on() {
-            // one thread per row (IIR is sequential along x)
+            // one thread per row (or column when smear.axis = 1): the IIR is sequential
             bind(self.smear, self.sets[dir], [0; 4]);
-            unsafe { d.cmd_dispatch(cmd, extent.height.div_ceil(64), 1, 1) };
+            unsafe { d.cmd_dispatch(cmd, extent.width.max(extent.height).div_ceil(64), 1, 1) };
             barrier();
             dir ^= 1;
         }

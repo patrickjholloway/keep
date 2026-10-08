@@ -82,7 +82,7 @@ Unknown parameter or source names are script errors (the last good frame is kept
 | --- | --- | --- |
 | `sync.depth` · `freq` · `speed` · `block` | 0 · 24 · 1.5 · 0.35 | max delay (fraction of a line) · bands per frame · re-roll rate (Hz) · fraction of bands that tear |
 | `ring.depth` · `freq` · `speed` · `chroma` | 0 · 3.37 · 0.5 · 0.6 | 0..1 · carrier cycles per scanline · drift (Hz) · R/G/B carrier phase offset (rad) |
-| `smear.depth` · `feedback` · `dir` | 0 · 0.95 · 1 | trail mix · IIR coefficient a · +1 → / −1 ← |
+| `smear.depth` · `feedback` · `dir` · `axis` | 0 · 0.95 · 1 · 0 | trail mix · IIR coefficient a · +1 forward / −1 back · 0 rows, 1 columns |
 | `dispersion.depth` · `mode` · `angle` | 0 · 0 · 0 | px of spread at 1080p · 0 radial / 1 directional · direction (rad) |
 | `warp.amount` · `zoom` · `a b c d` (complex) | 0 · 1 · 1, 0, 0, 1 | blend toward the Möbius map · output-plane scale · coefficients |
 | `spectral.mix` · `lo` · `hi` · `atten` · `phase` · `seed` · `soft` · `outside` | 0 · .02 · .12 · 1 · 0 · 0 · .01 · 1 | wet mix · band (cycles/px) · gain cut in band · ghost-echo strength · echo direction · band edge · gain outside band |
@@ -135,10 +135,10 @@ warp → spectral → crush. Each shader opens with a longer explanation of its 
    stripes lean diagonally. Light can't be negative, so the gain is `max(mix(1, c, depth), 0)`:
    depth 1 is true ring mod, less is amplitude modulation. Scaling RGB by one scalar scales
    luminance and keeps hue; `chroma` offsets the carrier per channel into colour fringes.
-3. **Smear** (`glitch_smear.comp`) — a one-pole IIR low-pass along each scanline,
+3. **Smear** (`glitch_smear.comp`) — a one-pole IIR low-pass along each scanline (or column, `axis` 1),
    `y[n] = (1 − a)·x[n] + a·y[n−1]`. Impulse response `(1 − a)·aⁿ`: unit DC gain, trail time
    constant `−1/ln a` pixels (a = 0.95 → 20 px, 0.99 → 100 px). Being recursive it is
-   inherently serial, so it is one compute thread per row. Only the history above the input is
+   inherently serial, so it is one compute thread per row (or column). Only the history above the input is
    boosted (by `1/√(1−a)`), so flat areas pass unchanged, beads stay crisp and grow comet tails.
 4. **Dispersion** (`glitch_disp.comp`) — a prism: refractive index follows Cauchy's
    `n(λ) ≈ A + B/λ²`, so the displacement is `k(λ) = (1/λ² − 1/550²)/(1/400² − 1/700²)` times
@@ -169,12 +169,13 @@ warp → spectral → crush. Each shader opens with a longer explanation of its 
    broad form is untouched; `seed` picks the echo direction. Gain is even and phase odd in `f`,
    so the inverse stays real. Only the *change* is upsampled and added back
    (`out = orig + mix·(up(filtered) − up(down(orig)))`), so the downsampling never blurs the
-   picture. Because the FFT sees the mirrored frame, echoes reflect at the frame edges
+   picture; that change is gated by local brightness, so echoes stay on or near the form
+   instead of rippling across empty black. Because the FFT sees the mirrored frame, echoes reflect at the frame edges
    instead of wrapping to the opposite edge. `src/glitch.rs` has a CPU twin of the algorithm,
    tested against a naive DFT.
 7. **Bitcrush / sample-and-hold** (`glitch_crush.comp`) — decimation holds one sample per
    `hold × hold` block (a lower sample rate, in 2D); quantization snaps brightness to
-   `2^(8 − 7·depth)` mid-rise levels (a lower bit depth) in the tone-compressed domain `c/(1 + c)`, so
+   `2^(8 − 7·depth)` mid-tread levels (black stays 0) (a lower bit depth) in the tone-compressed domain `c/(1 + c)`, so
    unbounded HDR values posterize evenly.
 
 The `mean_luma` source comes from `glitch_stats.comp`: one invocation averages a 64×36 grid of

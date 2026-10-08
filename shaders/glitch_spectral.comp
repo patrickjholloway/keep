@@ -14,9 +14,10 @@
 //                extension into the 2048×1024 FFT grid (re = rgb, im = 0). See EDGES below.
 //   1 STAGE      one radix-2 Stockham butterfly stage along rows or columns (log2 N of them)
 //   2 FILTER     per frequency bin: band gain + phase scramble
-//   3 COMPOSITE  out = orig + mix · (up(filtered) − up(down(orig)))
+//   3 COMPOSITE  out = orig + mix · gate · (up(filtered) − up(down(orig)))
 //                i.e. only the CHANGE the filter made is added at full resolution, so the
 //                downsampling to the working grid never blurs the untouched picture.
+//                gate = smoothstep(0.02, 0.15, local luma) keeps echoes off empty black.
 //
 // Stockham radix-2 (Ns = 1, 2, 4, …, L/2; thread j = 0 .. L/2−1 per line):
 //     k = j mod Ns,  v0 = x[j],  v1 = x[j + L/2] · e^{∓iπ k/Ns}
@@ -150,7 +151,13 @@ void main() {
         vec3 f01 = grid_re(c + ivec2(0, 1)) * norm, d01 = down(c + ivec2(0, 1), size);
         vec3 f11 = grid_re(c + ivec2(1, 1)) * norm, d11 = down(c + ivec2(1, 1), size);
         vec3 delta = mix(mix(f00 - d00, f10 - d10, t.x), mix(f01 - d01, f11 - d11, t.x), t.y);
-        vec3 o = max(imageLoad(src, px).rgb + g.spec.x * delta, vec3(0.0));
+        // Brightness gate: echoes only over or near the form. The working-grid sample is a
+        // ~2 px box blur; taking the max of its four taps reaches a little past the edge.
+        // Empty black (luma < 0.02) gets no ripple rings; full effect from luma 0.15 up.
+        vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+        float near = max(max(dot(d00, lw), dot(d10, lw)), max(dot(d01, lw), dot(d11, lw)));
+        float gate = smoothstep(0.02, 0.15, near);
+        vec3 o = max(imageLoad(src, px).rgb + g.spec.x * gate * delta, vec3(0.0));
         imageStore(dst, px, vec4(o, 1.0));
     }
 }

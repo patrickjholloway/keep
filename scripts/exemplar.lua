@@ -48,6 +48,7 @@ G.patch("crush_env", "crush.depth", 1)
 G.set("dispersion.mode", 0)                 -- radial: lens-like chromatic aberration
 G.set("sync.speed", 14)                     -- tears re-roll fast inside a burst
 G.set("smear.dir", 1)
+G.set("smear.axis", 1)                     -- vertical trails: distinct from the sync tear's horizontal slips
 -- Warp: an ELLIPTIC Möbius map with fixed points ±p. Conjugating a rotation by
 -- g(z) = (z - p)/(z + p) gives, normalized to a = d = 1:
 --   b = -i p tan(θ/2),  c = -i tan(θ/2) / p
@@ -62,11 +63,11 @@ G.set("warp.d", 1, 0)
 -- the map magnifies the centre by 1 + tan²(θ/2); zoom the output plane by the same amount
 -- (another cable from the same envelope) so the form keeps its size and only the swirl shows
 G.patch("drop_env", "warp.zoom", TT * TT)
-G.set("spectral.lo", 0.035)
+G.set("spectral.lo", 0.05)
 G.set("spectral.hi", 0.22)
 G.set("spectral.atten", 0.35)
 G.set("spectral.phase", 0.8)
-G.set("spectral.soft", 0.02)
+G.set("spectral.soft", 0.06)              -- gentle band edges: less ringing in empty space
 
 local tear_t, last_tear_onset = -10, 0
 local function choreograph_glitch(t, f, kick)
@@ -77,20 +78,21 @@ local function choreograph_glitch(t, f, kick)
   local drop = (form >= 20) and 1 or 0
   local breather = (form >= 28 and form < 30) and 1 or 0
   local active = (groove + build + drop) * (1 - breather)
+  local prog = build * (form - 12) / 8                     -- 0..1 across the build
+  local ramp = build * (0.3 + 0.7 * prog)                  -- build gains climb 0.3 -> 1.0
 
   -- sync slip: a ~0.15 s burst of tearing on each strong onset (groove + drop, rarer in build)
   if f.onset > 0.6 and last_tear_onset <= 0.6 then tear_t = t; G.set("sync.freq", 10 + (math.floor(t * 7) % 5) * 9) end
   last_tear_onset = f.onset
   local tear = math.exp(-(t - tear_t) / 0.08)
-  G.source("tear", active * tear * (0.05 * groove + 0.02 * build + 0.06 * drop))
-  G.set("sync.block", 0.25 + 0.3 * drop)
+  G.source("tear", active * tear * (0.05 * groove + 0.05 * ramp + 0.06 * drop))
+  G.set("sync.block", 0.25 + 0.1 * drop)      -- small blocks: no hard notches cut from the form
 
   -- dispersion on kicks: pixels of rainbow split at the frame edge
-  G.source("kick", active * kick * (40 * groove + 10 * build + 45 * drop))
+  G.source("kick", active * kick * (40 * groove + 40 * ramp + 90 * drop))
 
   -- build: smear and ring-mod carrier grow with the riser
-  local prog = build * (form - 12) / 8                     -- 0..1 across the build
-  G.source("smear_env", 0.3 * prog * prog + 0.2 * prog)
+  G.source("smear_env", ramp * (0.3 * prog * prog + 0.2 * prog))
   G.set("smear.feedback", 0.9 + 0.065 * prog)
   G.source("ring_env", 0.55 * prog * prog)
   G.set("ring.freq", 1.37 + 9 * prog * prog)               -- non-integer: stripes lean
@@ -108,8 +110,11 @@ local function choreograph_glitch(t, f, kick)
   local stutter = 0
   if form >= 19 and form < 20 then stutter = 1 end
   if drop == 1 and (form - 20) % 8 >= 7.5 then stutter = 1 end
-  G.source("crush_env", stutter * (0.45 + 0.3 * eighth))
-  G.set("crush.hold", stutter * (eighth == 1 and 14 or 5) + 1)
+  -- alternate a full hit on the off-beat 8th with a ~0.4-depth one on the on-beat, so the
+  -- silhouette survives between hits; depth capped at 6/7 so at least 2^2 = 4 levels remain
+  local hit = eighth == 1 and 0.75 or 0.3
+  G.source("crush_env", stutter * math.min(hit, 6 / 7))
+  G.set("crush.hold", stutter * (eighth == 1 and 10 or 2) + 1)
 end
 
 -- slow sections: 0 = calm intro, 1 = full energy

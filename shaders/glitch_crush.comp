@@ -5,9 +5,10 @@
 // value is held across the block — the 2D version of lowering an audio sample rate.
 // Bitcrush (quantization): brightness snaps to L levels, the 2D version of lowering bit depth.
 // HDR values are unbounded, so we quantize in a tone-compressed domain v = c/(1+c) ∈ [0,1),
-// snap to the centre of one of L equal bands (mid-rise: v → (floor(v·L) + ½)/L, never 1),
-// then expand back with c = v/(1−v). The top band maps to (L − ½)/L, a finite c (= 3 at L = 2)
-// rather than blowing highlights up to an extreme. depth 0..1 maps to L = 2^(8 − 7·depth)
+// snap to the nearest of L evenly spaced levels (mid-tread: v → round(v·(L−1))/(L−1)), then
+// expand back with c = v/(1−v). Mid-tread keeps black at exactly 0 (a mid-rise snap would lift
+// it to ½/L, washing the whole background grey at low L). The top level v = 1 would be c = ∞,
+// so it is clamped to (L − ½)/L, a finite c (= 3 at L = 2) rather than blown-out highlights. depth 0..1 maps to L = 2^(8 − 7·depth)
 // (256 levels down to 2): smooth gradients turn into posterized contour bands.
 #include "glitch_common.glsl"
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -22,7 +23,7 @@ void main() {
     if (g.crush.x > 0.0) {
         float levels = exp2(8.0 - 7.0 * clamp(g.crush.x, 0.0, 1.0));
         vec3 v = c / (1.0 + c);
-        v = (min(floor(v * levels), vec3(levels - 1.0)) + 0.5) / levels;
+        v = min(round(v * (levels - 1.0)) / (levels - 1.0), vec3((levels - 0.5) / levels));
         c = v / (1.0 - v);
     }
     imageStore(dst, px, vec4(c, 1.0));

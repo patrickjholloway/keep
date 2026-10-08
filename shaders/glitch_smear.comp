@@ -5,7 +5,9 @@
 // Its impulse response is (1 − a)·aⁿ: a bright bead leaves an exponentially fading tail of
 // time constant τ = −1/ln(a) pixels (a = 0.95 → 20 px, a = 0.99 → 100 px). DC gain is 1.
 // An IIR filter is inherently sequential (each output needs the previous one), so this is a
-// compute pass with ONE THREAD PER ROW walking the line left->right (or right->left).
+// compute pass with ONE THREAD PER LINE walking it forward or backward (dir). axis 0 walks rows
+// (horizontal trails), axis 1 walks columns (vertical trails, down for dir +1), which keeps the
+// smear visually distinct from the sync tear's horizontal slips.
 // The tail is scaled up by 1/√(1 − a) (the filter spreads a bead's energy thin). Because the
 // filter has unit DC gain, boosting acc itself would also lift every flat region by `boost`
 // (acc → v there), so only the HISTORY above the input is boosted:
@@ -17,17 +19,20 @@ layout(local_size_x = 64) in;
 
 void main() {
     ivec2 size = imageSize(src);
-    int y = int(gl_GlobalInvocationID.x);
-    if (y >= size.y) return;
+    bool vert = g.smear.w > 0.5;
+    int line = int(gl_GlobalInvocationID.x);
+    int len = vert ? size.y : size.x;
+    if (line >= (vert ? size.x : size.y)) return;
     float a = clamp(g.smear.y, 0.0, 0.999);
     float boost = min(inversesqrt(1.0 - a), 8.0);
     bool rev = g.smear.z < 0.0;
     vec3 acc = vec3(0.0);
-    for (int i = 0; i < size.x; i++) {
-        int x = rev ? size.x - 1 - i : i;
-        vec3 v = imageLoad(src, ivec2(x, y)).rgb;
+    for (int i = 0; i < len; i++) {
+        int s = rev ? len - 1 - i : i;
+        ivec2 p = vert ? ivec2(line, s) : ivec2(s, line);
+        vec3 v = imageLoad(src, p).rgb;
         vec3 o = v + g.smear.x * max(boost * a * (acc - v), vec3(0.0));
         acc = (1.0 - a) * v + a * acc;
-        imageStore(dst, ivec2(x, y), vec4(o, 1.0));
+        imageStore(dst, p, vec4(o, 1.0));
     }
 }

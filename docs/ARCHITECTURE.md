@@ -37,7 +37,7 @@ sees the 4D scene. 11 × vec4, std140, size asserted. Set by the caller on
 |---|---|
 | `sync` | depth (fraction of a line), freq (bands/frame), speed (Hz), block (0..1) |
 | `ring` | depth, freq (carrier cycles/scanline), speed (Hz), chroma (rad) |
-| `smear` | depth, feedback a, direction ±1 |
+| `smear` | depth, feedback a, direction ±1, axis (0 rows, 1 columns) |
 | `disp` | depth (px @1080p), mode (0 radial / 1 directional), angle |
 | `warp_ab`, `warp_cd` | Möbius a, b, c, d (complex), already blended with identity by amount |
 | `warp_m` | amount (0 = bypass), zoom |
