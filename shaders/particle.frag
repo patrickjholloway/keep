@@ -55,6 +55,8 @@ void main() {
     // so the back wall no longer speckles through the front surface. The field is centred at
     // the origin, so sign(dot(center, cam)) tells front vs back hemisphere.
     float side = dot(normalize(v_center + 1e-6), normalize(scene.cam_pos.xyz));
-    float depth = mix(0.6, 1.0, smoothstep(-0.3, 0.3, side));
+    // While bass is high (thick shell) dim the back half harder (up to 55%) so creases survive.
+    float backdim = mix(0.4, 0.55, smoothstep(0.3, 0.8, scene.audio.x));
+    float depth = mix(1.0 - backdim, 1.0, smoothstep(-0.3, 0.3, side));
     o_color = vec4(col * v_vis * depth * aa, 1.0);                       // additive blend in the pipeline
 }

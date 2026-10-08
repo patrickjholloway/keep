@@ -5,7 +5,7 @@
 // The HDR image is read as a storage image (imageLoad), so "blur" here is a sparse gather of
 // explicit texel loads rather than filtered sampling.
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D hdr;
-layout(push_constant) uniform Push { vec4 knobs; } pc;   // x = exposure, y = onset, z = time, w = bass
+layout(push_constant) uniform Push { vec4 knobs; } pc;   // x = exposure, y = beat rise, z = time, w = bass
 layout(location = 0) out vec4 o_color;
 
 // ACES filmic fit (Narkowicz). Applied to LUMINANCE only, below, so it can't bleach hue.
@@ -55,13 +55,14 @@ void main() {
     float bass = clamp(pc.knobs.w, 0.0, 1.0);
     vec3 lowcol = mix(vec3(0.06, 0.04, 0.14), vec3(0.09, 0.04, 0.12), bass);
     c += 0.35 * lowcol * exp(-rd * rd * 3.0);
-    // Beat ring: a thin expanding ring that lives ~150 ms after each kick. knobs.w carries the
-    // onset envelope (a fast-decaying spike, ~150 ms); we treat (1 - onset) as "time since the
-    // hit" so the ring expands outward while it fades. Zero between hits — no sustained glow.
-    float onset = clamp(pc.knobs.y, 0.0, 1.0);
-    float age = 1.0 - onset;                                 // 0 at the hit
-    float ringr = 0.25 + 0.45 * age;
-    float ring = exp(-pow((rd - ringr) / 0.025, 2.0)) * smoothstep(0.3, 1.0, onset);
+    // Beat ring: fires only at the START of each beat. knobs.y is the beat-rise envelope from
+    // the script: 1 at the moment the beat level rises, decaying to 0 over ~0.25 s, and 0 while
+    // the level merely stays high. The ring radius follows time since that rise (age = 1 - env),
+    // so it expands outward while it fades out.
+    float rise = clamp(pc.knobs.y, 0.0, 1.0);
+    float age = 1.0 - rise;                                  // 0 at the rise, -> 1 as it decays
+    float ringr = 0.22 + 0.5 * age;
+    float ring = exp(-pow((rd - ringr) / 0.025, 2.0)) * rise * rise;
     c += ring * vec3(0.10, 0.12, 0.30);
 
     c *= pc.knobs.x;

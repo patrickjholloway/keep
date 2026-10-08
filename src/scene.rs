@@ -46,7 +46,10 @@ pub struct SceneParams {
     pub proj: [[f32; 4]; 4],
     /// xyz = eye, w = fov_y radians.
     pub cam_pos: [f32; 4],
-    /// x = particle_count, y = prim_count.
+    /// x = particle_count, y = prim_count,
+    /// z = palette drift (f32 bits, -1..1: amber -> teal -> magenta; read with uintBitsToFloat),
+    /// w = beat-rise envelope (f32 bits, 1 at the start of a beat, decays ~0.25 s; drives the ring).
+    /// Floats ride in the uvec4 as raw bits so the std140 layout stays unchanged.
     pub counts: [u32; 4],
     pub prims: [GpuPrimitive; MAX_PRIMS],
 }
@@ -74,6 +77,10 @@ pub struct SceneDesc {
     pub temperature: (f32, f32),
     pub reflectivity: f32,
     pub exposure: f32,
+    /// Slow colour journey across the 4D sweep: -1 amber, 0 teal/amber, +1 magenta-amber.
+    pub palette: f32,
+    /// Beat-start envelope (1 right at a beat's rise, decaying to 0). Tonemap ring age = 1 - this.
+    pub beat_rise: f32,
     /// Lua-driven camera; `None` = leave to the interactive controller / default.
     pub camera: Option<Camera>,
 }
@@ -100,7 +107,7 @@ impl SceneDesc {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
             cam_pos: [camera.eye.x, camera.eye.y, camera.eye.z, camera.fov_y],
-            counts: [particle_count, n as u32, 0, 0],
+            counts: [particle_count, n as u32, self.palette.to_bits(), self.beat_rise.to_bits()],
             prims,
         }
     }

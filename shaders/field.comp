@@ -64,9 +64,29 @@ void main() {
     vec3 col = mix(bb, accent, 0.6 * 0.55 * abs(wslope));
     // Edge-on term: where the surface normal is perpendicular to the view ray we are looking
     // along the surface, so silhouettes, outlines and pinch-off necks get brighter.
+    // Palette drift (script-driven, -1..1, tied to the slice position w): tint the warm body
+    // amber -> teal/amber -> magenta-amber, so the sweep through w reads as a colour journey.
+    // Only the warm part of the shell is tinted; the hot blue-white highlights stay as they are.
+    float pal = clamp(uintBitsToFloat(scene.counts.z), -1.0, 1.0);
+    vec3 amber = vec3(1.0, 0.55, 0.12);
+    vec3 teal  = vec3(0.10, 0.85, 0.75);
+    vec3 mag   = vec3(1.0, 0.22, 0.65);
+    vec3 target = pal < 0.0 ? mix(teal, amber, -pal) : mix(teal, mag, pal);
+    target = mix(target, amber, 0.25);                     // always keep some amber in the mix
+    float warm = 1.0 - smoothstep(4000.0, 8000.0, temp);   // 1 for the body, 0 for hot highlights
+    float tl = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float targL = dot(target, vec3(0.2126, 0.7152, 0.0722));
+    col = mix(col, target * (tl / targL), 0.75 * warm);
+
     vec3 vdir = normalize(scene.cam_pos.xyz - s.xyz);
     float edge = 1.0 - abs(dot(n, vdir));
-    col *= 0.75 + 0.9 * edge * edge * edge;
+    // Scale the outline gain with bass: bass thickens the shell (surface_width grows), which
+    // would otherwise drown silhouettes in an even speckle at the climax.
+    float bass = scene.audio.x;
+    col *= 0.75 + 0.9 * (1.0 + 1.5 * bass) * edge * edge * edge;
+    // Interior beads (inside the shape, far from the d = 0 surface) glow 30% less, so only the
+    // shell and its creases carry light and sparse frames stop looking grainy inside.
+    col *= mix(1.0, 0.7, smoothstep(0.2, 0.9, -d / eps));
     o.emission = vec4(col * scene.material.w, vis);
     droplets[id] = o;
 }

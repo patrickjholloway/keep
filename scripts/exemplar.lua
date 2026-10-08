@@ -22,6 +22,8 @@ local function section(t) return H.ease(H.tri(t + 4, 32)) end
 -- State kept across frames (offline rendering calls update() in frame order).
 local jump_target, jump, last_onset, last_t = 0, 0, 0, 0
 local push_t, last_push = -10, 0
+local jump_t = -10                 -- time of the last slice jump (it bounces back after 0.3 s)
+local beat_prev, rise_t = 0, -10   -- previous beat level, time of the last beat RISE
 
 function update(t, f)
   local energy = section(t)
@@ -32,9 +34,12 @@ function update(t, f)
   -- bass-triggered slice jumps: each strong onset flips the offset to +-0.15, eased toward it.
   if f.onset > 0.5 and last_onset <= 0.5 then
     jump_target = (jump_target > 0) and -0.15 or 0.15
+    jump_t = t
   end
+  -- bounce back: a jump only holds for 0.3 s, so the slice never parks outside the object
+  local target_now = (t - jump_t < 0.3) and jump_target or 0
   last_onset = f.onset
-  jump = jump + (jump_target - jump) * (1 - math.exp(-dt * 10))
+  jump = jump + (target_now - jump) * (1 - math.exp(-dt * 10))
 
   -- 4D rotation: through-w planes dominate, ordinary 3D spin (yz) is slow.
   local xw = t * 0.32 + 0.5 * kick
@@ -72,14 +77,22 @@ function update(t, f)
   local hot = 12500 + 8000 * f.onset + 3000 * f.high
 
   -- camera: one orbit per ~25 s. Distance follows the cross-section's size: |w_slice| near 0
-  -- is the fattest slice, near +-1 the smallest. Clamped to 3.0..3.8 for consistent framing.
+  -- is the fattest slice, near +-1 the smallest. Clamped to 2.4..3.2 so the shape fills ~55% of the frame height.
+  -- Beat ring: send only the RISE of the beat level (max(beat - beat_prev, 0)), so the ring
+  -- fires at the start of each beat instead of glowing for as long as the level stays high.
+  -- A rise of >0.15 restarts the envelope; it then decays with a ~0.25 s time constant.
+  local beat = f.onset
+  if beat - beat_prev > 0.15 then rise_t = t end
+  beat_prev = beat
+  local beat_rise = math.exp(-(t - rise_t) / 0.25)
+
   if f.onset > 0.5 and last_push <= 0.5 then push_t = t end
   last_push = f.onset
   local slice_extent = math.max(0, 1 - (w_slice / 1.05) ^ 2)        -- ~0..1
-  local dist = math.min(3.8, math.max(3.0, 2.6 + 0.8 * slice_extent + 0.5))
-  -- onset push: quick 0.3 dolly, eased out over 0.4 s
+  local dist = math.min(3.2, math.max(2.4, 2.0 + 0.8 * slice_extent + 0.5))
+  -- onset push: quick 0.4 dolly, eased out over 0.4 s
   local pa = math.min(math.max((t - push_t) / 0.4, 0), 1)
-  dist = dist - 0.3 * (1 - pa) ^ 3
+  dist = dist - 0.4 * (1 - pa) ^ 3
   local orbit = t * H.tau / 25
   local eye = { dist * math.sin(orbit), 0.9 * math.sin(t * 0.21), dist * math.cos(orbit) }
   local roll = math.rad(8) * math.sin(t * 0.4)                     -- slow +-8 degree roll
@@ -105,12 +118,17 @@ function update(t, f)
     },
     field = field,
     w_slice         = w_slice,
-    surface_width   = 0.012 + 0.022 * f.bass,   -- thin shell: a thick one stacks into a white blob
+    -- thin shell: a thick one stacks into a white blob. Near/past the edge of the object
+    -- (|w| > 0.9) the shell widens so a sparse spray of beads lingers instead of an empty frame.
+    surface_width   = 0.012 + 0.022 * f.bass + 0.03 * H.smoothstep(0.9, 1.15, math.abs(w_slice)),
     particle_radius = 0.014 * (1 + 0.4 * f.onset),
     temperature     = { cold, hot },
     reflectivity    = 0.6 + 0.3 * f.high,
     exposure        = (0.9 + 0.4 * energy) * (1 - 0.35 * f.bass) + 0.35 * f.onset,
     -- the field is centred at the origin (all prims orbit it), so the origin is its centre of mass
+    -- colour journey tied to the slice position: -1 amber, 0 teal/amber, +1 magenta-amber
+    palette         = math.max(-1, math.min(1, w_slice)),
+    beat_rise       = beat_rise,
     camera          = { eye = eye, target = { 0, 0, 0 }, fov = 46 - 4 * energy, roll = roll },
   }
 end

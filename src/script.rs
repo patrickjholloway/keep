@@ -260,6 +260,8 @@ pub fn parse_scene(t: &Table) -> anyhow::Result<SceneDesc> {
         temperature,
         reflectivity: num(t, "reflectivity", 0.6)?,
         exposure: num(t, "exposure", 1.0)?,
+        palette: num(t, "palette", 0.0)?,
+        beat_rise: num(t, "beat_rise", 0.0)?,
         camera,
     })
 }

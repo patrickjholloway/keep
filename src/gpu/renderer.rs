@@ -75,7 +75,7 @@ pub struct Renderer {
     pub field_pass: FieldPass,
     pub particle_pass: ParticlePass,
     pub tonemap: TonemapPass,
-    /// Tonemap knobs: x = exposure, y = onset, z = time, w = bass (y/z/w overwritten per frame). Free to tweak x between frames.
+    /// Tonemap knobs: x = exposure, y = beat rise, z = time, w = bass (y/z/w overwritten per frame). Free to tweak x between frames.
     pub tonemap_knobs: [f32; 4],
     pub pool: vk::CommandPool,
     pub cmd: vk::CommandBuffer,
@@ -156,7 +156,9 @@ impl Renderer {
         self.scene_ubo.write(std::slice::from_ref(&p));
         // Tonemap knobs z/w are per-frame: z = time (seeds film grain), w = bass (tints the
         // background glow). x/y (exposure, vignette) stay whatever the caller set.
-        self.tonemap_knobs[1] = p.audio[3];   // onset envelope drives the short beat ring
+        // knobs.y = beat-rise envelope (1 at the start of a beat, decays over ~0.25 s). The ring
+        // only fires on the rise, not while the beat level stays high.
+        self.tonemap_knobs[1] = f32::from_bits(p.counts[3]);
         self.tonemap_knobs[2] = p.slice[3];
         self.tonemap_knobs[3] = p.audio[0];
         unsafe {
