@@ -129,6 +129,32 @@ local function choreograph_glitch(t, f, kick)
   G.set("crush.hold", stutter * (eighth == 1 and 10 or 2) + 1)
 end
 
+-- ---------------------------------------------------------------- sonification voice
+-- The visible slice, played back as 1024 additive partials (src/sonify.rs): bins high on the
+-- form sing high, bulges sharper than dents, the hot shell brighter, left/right follows the
+-- form. Quantized to the track's key: the synthesized track loops Dm - Bb - F - C, so D minor
+-- pentatonic (D F G A C) sits inside every chord. It stays well under the music, opens up in
+-- the quiet intro, and swells in the bar 28-30 breather where the form is clean and alone.
+sonify.enable = true
+sonify.key = "D"
+sonify.scale = "minor_pentatonic"
+sonify.base = 38                  -- D2
+sonify.span = 36                  -- three octaves, D2..D5
+sonify.spread = 0.9
+sonify.smoothing = 0.08           -- glides between frames; ~80 ms, no zipper
+local function choreograph_sonify(t, f)
+  local form = (t / BAR) % 36
+  local intro = 1 - H.smoothstep(3.5, 4.5, form)
+  local drop = H.smoothstep(19.5, 20.5, form)
+  local breather = H.smoothstep(27.6, 28.4, form) * (1 - H.smoothstep(29.6, 30.4, form))
+  local outro = H.smoothstep(35.5, 36, form)
+  -- a bed under the groove, thinner under the busy drop, open in the intro, a swell in the breather
+  local g = 0.05 - 0.015 * drop + 0.05 * math.max(intro, outro)
+  sonify.gain = g + (0.16 - g) * breather
+  -- hats brighten it a little; in the breather it turns glassy and pure
+  sonify.brightness = (0.25 + 0.35 * f.high) * (1 - 0.7 * breather)
+end
+
 -- slow sections: 0 = calm intro, 1 = full energy
 local function section(t) return H.ease(H.tri(t + 4, 32)) end
 
@@ -144,6 +170,7 @@ function update(t, f)
   -- beat envelope: ~150 ms decay assuming ~0.5 s beats (beat_phase runs 0..1 per beat)
   local kick = H.pulse(f.beat_phase, 3.3) * f.bass
   choreograph_glitch(t, f, kick)
+  choreograph_sonify(t, f)
 
   -- bass-triggered slice jumps: each strong onset flips the offset to +-0.15, eased toward it.
   if f.onset > 0.5 and last_onset <= 0.5 then

@@ -1,7 +1,8 @@
 //! app.rs — `keep run`: winit window, live Lua hot reload, free-fly camera.
 //! Keys: WASD/QE move, mouse-drag look, 1/2/3 (+shift = reverse) nudge extra XW/YW/ZW rotation
 //! on top of whatever Lua sets, [ ] nudge w_slice, R reset nudges, Esc quit.
-//! Audio: Space pause/resume, Left/Right seek ±5 s, M mute (visuals keep reacting).
+//! Audio: Space pause/resume, Left/Right seek ±5 s, M mute the music (visuals keep reacting),
+//! V toggle the sonify voice (the visible slice played as additive synthesis, src/sonify.rs).
 //! The scene clock `t` and the Features come from the audio playback position, not the wall clock.
 use std::{path::Path, sync::Arc, time::Instant};
 
@@ -17,7 +18,7 @@ use crate::{
     camera::FlyCamera,
     gpu::{renderer::CloudSpec, target::Swapchain, Renderer},
     math4d::{Affine4, Plane},
-    live::{MicAnalyzer, Player, Track},
+    live::{MicAnalyzer, Player, Track, VoiceSender},
     script::ScriptHost,
 };
 
@@ -43,14 +44,14 @@ pub struct Nudges {
 }
 
 /// Open the window and run until closed (or after `max_frames` frames, for smoke tests).
-pub fn run(script: &Path, max_frames: Option<u64>, audio: AudioSource) -> anyhow::Result<()> {
+pub fn run(script: &Path, max_frames: Option<u64>, audio: AudioSource, voice: Option<VoiceSender>) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     // Poll = redraw continuously (an animation, not a document editor).
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         script: ScriptHost::load(script)?, max_frames, gpu: None, cam: FlyCamera::default(),
         nudges: Nudges::default(), start: Instant::now(), last: Instant::now(), frames: 0,
-        dragging: false, last_cursor: None, fast: false, error: None, audio,
+        dragging: false, last_cursor: None, fast: false, error: None, audio, voice, voice_logged: false,
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error { return Err(e); }
@@ -81,6 +82,9 @@ struct App {
     fast: bool,
     error: Option<anyhow::Error>,
     audio: AudioSource,
+    /// Sonify voice hand-off (None = no output device).
+    voice: Option<VoiceSender>,
+    voice_logged: bool,
 }
 
 impl App {
@@ -122,6 +126,17 @@ impl App {
             unsafe { gpu.renderer.ctx.device.device_wait_idle()? };
             gpu.swapchain.recreate(&gpu.renderer.ctx, size.width, size.height)?;
             gpu.renderer.invalidate_image_bindings();
+        }
+        // Sonify: publish the newest completed frame's surface descriptor + the script's knobs.
+        if let Some(v) = self.voice.as_mut() {
+            v.send(&desc.sonify, &gpu.renderer.surface);
+            if !self.voice_logged && desc.sonify.enable && gpu.renderer.surface.total > 0 {
+                self.voice_logged = true;
+                let on = v.on.load(std::sync::atomic::Ordering::Relaxed);
+                eprintln!("[run] sonify voice {} ({} visible beads, {} lit bins); V toggles",
+                    if on { "on" } else { "off" }, gpu.renderer.surface.total,
+                    gpu.renderer.surface.bins.iter().filter(|b| b.count > 0).count());
+            }
         }
         self.frames += 1;
         Ok(())
@@ -195,6 +210,15 @@ impl App {
             KeyCode::BracketRight => self.nudges.w_slice += 0.02,
             KeyCode::KeyR => self.nudges = Nudges::default(),
             KeyCode::Escape => el.exit(),
+            KeyCode::KeyV if !ev.repeat => {
+                if let Some(v) = &self.voice {
+                    let on = v.toggle();
+                    eprintln!("[run] sonify voice {}", if on { "on" } else { "off" });
+                    if on && matches!(self.audio, AudioSource::Mic(_)) {
+                        eprintln!("[run] warning: with --mic the voice can feed back (speaker -> mic); use headphones");
+                    }
+                }
+            }
             KeyCode::Space | KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::KeyM if !ev.repeat || code != KeyCode::Space => {
                 let AudioSource::File { player, .. } = &self.audio else { return };
                 match code {

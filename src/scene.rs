@@ -85,6 +85,8 @@ pub struct SceneDesc {
     pub camera: Option<Camera>,
     /// Image-plane glitch patch bay state (resolved per frame by `glitch::resolve`).
     pub glitch: crate::glitch::GlitchDesc,
+    /// Sonification voice knobs (Lua `sonify.*`, see src/sonify.rs).
+    pub sonify: crate::sonify::SonifyParams,
 }
 
 impl SceneDesc {

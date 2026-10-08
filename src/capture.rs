@@ -68,6 +68,19 @@ impl Encoder {
     }
 }
 
+/// Mux `video` (stream-copied, no re-encode) with `audio` (-> AAC) into `out`, trimmed to the
+/// shorter of the two.
+pub fn mux(video: &std::path::Path, audio: &std::path::Path, out: &std::path::Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video).arg("-i").arg(audio)
+        .args(["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", "-movflags", "+faststart"])
+        .arg(out)
+        .status()
+        .context("spawning ffmpeg for the audio mux")?;
+    anyhow::ensure!(status.success(), "ffmpeg mux exited with {status}");
+    Ok(())
+}
+
 /// True if `ffmpeg` is runnable on PATH.
 pub fn ffmpeg_available() -> bool {
     std::process::Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)

@@ -41,17 +41,30 @@ fn main() -> anyhow::Result<()> {
                     f => bail!("unknown flag {f}"),
                 }
             }
+            // Sonify voice: on by default with a file (the script's `sonify.enable` decides);
+            // OFF by default with --mic, where speaker -> mic feedback would loop it (V enables).
+            let (voice_tx, voice_rx) = live::voice_channel(!mic);
+            let mut _voice_stream = None;
+            let mut voice = Some(voice_tx);
             let audio = if mic {
-                app::AudioSource::Mic(live::MicAnalyzer::start()?)
+                let a = app::AudioSource::Mic(live::MicAnalyzer::start()?);
+                match live::voice_only_output(voice_rx) {
+                    Ok(s) => {
+                        _voice_stream = Some(s);
+                        eprintln!("[run] sonify voice is OFF with --mic (speaker -> mic feedback); V enables it, use headphones");
+                    }
+                    Err(e) => { eprintln!("[run] no audio output for the sonify voice ({e:#})"); voice = None; }
+                }
+                a
             } else {
                 // Default: the exemplar track (75 s, as in the README render), cached in out/.
                 let wav = wav.unwrap_or_else(|| PathBuf::from("out/keep-exemplar.wav"));
                 let track = live::prepare(&wav, 75.0)?;
-                let player = live::Player::start(&wav)?;
+                let player = live::Player::start(&wav, Some(voice_rx))?;
                 eprintln!("[run] playing {} ({:.1}s loop)", wav.display(), player.duration());
                 app::AudioSource::File { player, track }
             };
-            app::run(&script, frames, audio)
+            app::run(&script, frames, audio, voice)
         }
         Some("render") => offline::render(&parse_render(&args[1..])?),
         Some("probe") => probe(),

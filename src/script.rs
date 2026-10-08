@@ -23,6 +23,7 @@ use crate::{
     glitch::{self, GlitchDesc, Lfo, LfoShape, Patch},
     math4d::{Affine4, Plane},
     scene::{Camera, SceneDesc},
+    sonify::{key_from_name, Scale, SonifyParams},
 };
 
 /// Lua source installed before every (re)load. Pure Lua: easy to read, easy to extend.
@@ -74,6 +75,12 @@ function glitch.lfo(name, shape, rate, phase) glitch._lfo[name] = { shape = shap
 -- script-computed source value (e.g. an envelope): glitch.source("drop", x)
 function glitch.source(name, v) glitch._src[name] = v end
 function glitch.clear() glitch._set, glitch._patch, glitch._src = {}, {}, {} end
+
+-- sonification voice (src/sonify.rs): plain fields, read after every update(). Unset = default.
+--   enable (false) gain (0.12) base (45, MIDI) span (36, semitones) key ("C" or 0..11)
+--   scale ("pentatonic" | "minor_pentatonic" | "major" | "minor" | "dorian" | ... or {0,3,7})
+--   quantize (true) brightness (0.5) spread (0.8) smoothing (0.05 s)
+sonify = {}
 "#;
 
 pub struct ScriptHost {
@@ -146,6 +153,9 @@ impl ScriptHost {
         let mut desc = parse_scene(&ret)?;
         if let Some(g) = self.lua.globals().get::<Option<Table>>("glitch").map_err(lua_err)? {
             desc.glitch = parse_glitch(&g).context("glitch")?;
+        }
+        if let Some(t) = self.lua.globals().get::<Option<Table>>("sonify").map_err(lua_err)? {
+            desc.sonify = parse_sonify(&t).context("sonify")?;
         }
         Ok(desc)
     }
@@ -288,7 +298,47 @@ pub fn parse_scene(t: &Table) -> anyhow::Result<SceneDesc> {
         beat_rise: num(t, "beat_rise", 0.0)?,
         camera,
         glitch: GlitchDesc::default(),
+        sonify: SonifyParams::default(),
     })
+}
+
+/// Read the `sonify` table (plain fields) into SonifyParams; unknown keys are errors.
+pub fn parse_sonify(t: &Table) -> anyhow::Result<SonifyParams> {
+    let mut p = SonifyParams::default();
+    for pair in t.pairs::<String, Value>() {
+        let (k, v) = pair.map_err(lua_err)?;
+        let f = || -> anyhow::Result<f32> {
+            match &v {
+                Value::Integer(i) => Ok(*i as f32),
+                Value::Number(n) => Ok(*n as f32),
+                o => bail!("sonify.{k} must be a number, got {}", o.type_name()),
+            }
+        };
+        let b = || -> anyhow::Result<bool> {
+            match &v { Value::Boolean(b) => Ok(*b), o => bail!("sonify.{k} must be a boolean, got {}", o.type_name()) }
+        };
+        match k.as_str() {
+            "enable" => p.enable = b()?,
+            "quantize" => p.quantize = b()?,
+            "gain" => p.gain = f()?.clamp(0.0, 1.0),
+            "base" => p.base = f()?.clamp(12.0, 108.0),
+            "span" => p.span = f()?.clamp(0.0, 72.0),
+            "brightness" => p.brightness = f()?.clamp(0.0, 1.0),
+            "spread" => p.spread = f()?.clamp(0.0, 1.0),
+            "smoothing" => p.smoothing = f()?.clamp(0.001, 2.0),
+            "key" => p.key = match &v {
+                Value::String(s) => { let s = s.to_str().map_err(lua_err)?; key_from_name(&s).ok_or_else(|| anyhow!("sonify.key: unknown key `{}`", &*s))? }
+                _ => (f()?.round() as i32).rem_euclid(12),
+            },
+            "scale" => p.scale = match &v {
+                Value::String(s) => { let s = s.to_str().map_err(lua_err)?; Scale::named(&s).ok_or_else(|| anyhow!("sonify.scale: unknown scale `{}`", &*s))? }
+                Value::Table(d) => Scale::from_degrees(&vec_n(d)?.iter().map(|x| x.round() as i32).collect::<Vec<_>>()),
+                o => bail!("sonify.scale must be a name or a list of semitones, got {}", o.type_name()),
+            },
+            other => bail!("unknown parameter sonify.{other}"),
+        }
+    }
+    Ok(p)
 }
 
 /// Read the prelude's `glitch` state tables into a GlitchDesc, validating names.
@@ -349,6 +399,9 @@ mod tests {
         let quiet = h.update(10.0, &feats(0.0, 0.0, 0.5)).unwrap();
         let loud = h.update(10.0, &feats(1.0, 1.0, 0.0)).unwrap();
         assert!(quiet.camera.is_some());
+        assert!(quiet.sonify.enable && quiet.sonify.key == 2 && quiet.sonify.quantize, "exemplar plays the voice in D");
+        let breather = h.update(29.0 * 240.0 / 122.0, &feats(0.0, 0.0, 0.5)).unwrap();
+        assert!(breather.sonify.gain > 2.0 * quiet.sonify.gain, "the voice swells in the breather");
         assert!(loud.temperature.1 > quiet.temperature.1, "onset should heat");
         assert_ne!(quiet.object.a, loud.object.a);
         // sweep over time: w_slice must move
@@ -395,6 +448,26 @@ mod tests {
         assert!(parse_glitch(&g).is_err(), "unknown source must be rejected");
         lua.load(r#"glitch.clear(); glitch.set("sync.bogus", 1)"#).exec().unwrap();
         assert!(parse_glitch(&g).is_err(), "unknown parameter must be rejected");
+    }
+
+    #[test]
+    fn sonify_params_parse_and_validate() {
+        let lua = Lua::new();
+        lua.load(PRELUDE).exec().unwrap();
+        let t: Table = lua.globals().get("sonify").unwrap();
+        assert_eq!(parse_sonify(&t).unwrap(), SonifyParams::default(), "empty table = defaults");
+        lua.load(r#"sonify.enable = true; sonify.gain = 0.2; sonify.key = "D"; sonify.scale = "minor_pentatonic"
+            sonify.quantize = false; sonify.base = 50"#).exec().unwrap();
+        let p = parse_sonify(&t).unwrap();
+        assert!(p.enable && !p.quantize && p.key == 2 && p.gain == 0.2 && p.base == 50.0);
+        assert_eq!(p.scale, Scale::named("minor_pentatonic").unwrap());
+        lua.load("sonify.scale = {0, 4, 7}; sonify.key = 9").exec().unwrap();
+        let p = parse_sonify(&t).unwrap();
+        assert_eq!((p.scale, p.key), (Scale::from_degrees(&[0, 4, 7]), 9));
+        lua.load("sonify.bogus = 1").exec().unwrap();
+        assert!(parse_sonify(&t).is_err(), "unknown key must be rejected");
+        lua.load("sonify.bogus = nil; sonify.scale = 'nope'").exec().unwrap();
+        assert!(parse_sonify(&t).is_err(), "unknown scale must be rejected");
     }
 
     #[test]

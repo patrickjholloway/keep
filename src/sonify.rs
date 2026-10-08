@@ -101,6 +101,7 @@ impl SurfaceDescriptor {
 
     /// CPU twin of surface.wgsl's accumulation (tests, and documentation by example).
     /// `beads` = (position, unit normal, heat, roughness is derived) relative to `center`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn from_beads(beads: &[(Vec3, Vec3, f32)], center: Vec3) -> SurfaceDescriptor {
         let mut words = vec![0u32; 4 + 4 * NBINS];
         let mut head = [0i32; 4];
@@ -125,6 +126,7 @@ impl SurfaceDescriptor {
 }
 
 /// Octahedral encode (mirror of surface.wgsl): unit vector → [-1, 1]².
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn oct_encode(d: Vec3) -> [f32; 2] {
     let d = d / (d.x.abs() + d.y.abs() + d.z.abs());
     if d.z >= 0.0 { return [d.x, d.y]; }
@@ -145,6 +147,7 @@ pub fn oct_decode(e: [f32; 2]) -> Vec3 {
 }
 
 /// Bin index of a unit direction (same arithmetic as the shader).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn bin_of(d: Vec3) -> usize {
     let e = oct_encode(d);
     let c = |v: f32| ((v * 0.5 + 0.5) * SIDE as f32).clamp(0.0, SIDE as f32 - 0.5) as usize;
@@ -381,8 +384,10 @@ pub struct Bank {
     pub beta_t: Vec<f32>,
     pub al_t: Vec<f32>,
     pub ar_t: Vec<f32>,
-    /// One-pole smoothing coefficient per sample.
+    /// One-pole smoothing coefficient per sample (amplitude, pan, brightness).
     pub k: f32,
+    /// Separate, faster coefficient for pitch (glide), so quantized notes step instead of slur.
+    pub k_inc: f32,
 }
 
 /// The kernels the bench compares.
@@ -426,9 +431,9 @@ impl<V: Lanes> Osc<V> {
     }
     /// One sample for W oscillators at once. Returns the oscillator output y in −1..1.
     #[inline(always)]
-    fn step(&mut self, k: V, c: &SinConsts<V>) -> V {
+    fn step(&mut self, k: V, k_inc: V, c: &SinConsts<V>) -> V {
         // one-pole smoothing toward the targets: x += k (t − x)
-        self.inc = k.mul_add(self.inc_t - self.inc, self.inc);
+        self.inc = k_inc.mul_add(self.inc_t - self.inc, self.inc);
         self.beta = k.mul_add(self.beta_t - self.beta, self.beta);
         self.al = k.mul_add(self.al_t - self.al, self.al);
         self.ar = k.mul_add(self.ar_t - self.ar, self.ar);
@@ -447,6 +452,7 @@ impl<V: Lanes> Osc<V> {
 fn render_block<V: Lanes>(b: &mut Bank, out_l: &mut [f32], out_r: &mut [f32]) {
     let len = out_l.len().min(out_r.len()).min(BLOCK);
     let k = V::splat(b.k);                                   // (1) broadcast, outside every loop
+    let k_inc = V::splat(b.k_inc);
     let c = SinConsts::<V>::new();
     let c1 = SinConsts::<f32>::new();
     let zero = V::splat(0.0);
@@ -456,7 +462,7 @@ fn render_block<V: Lanes>(b: &mut Bank, out_l: &mut [f32], out_r: &mut [f32]) {
     for i in (0..full).step_by(V::W) {                       // (2) loop by vector width
         let mut o = Osc::<V>::load(b, i);
         for s in 0..len {
-            let y = o.step(k, &c);                           // (3) lane-parallel
+            let y = o.step(k, k_inc, &c);                    // (3) lane-parallel
             acc_l[s] = o.al.mul_add(y, acc_l[s]);
             acc_r[s] = o.ar.mul_add(y, acc_r[s]);
         }
@@ -467,7 +473,7 @@ fn render_block<V: Lanes>(b: &mut Bank, out_l: &mut [f32], out_r: &mut [f32]) {
     for i in full..b.n {
         let mut o = Osc::<f32>::load(b, i);
         for s in 0..len {
-            let y = o.step(b.k, &c1);
+            let y = o.step(b.k, b.k_inc, &c1);
             rem_l[s] = o.al.mul_add(y, rem_l[s]);
             rem_r[s] = o.ar.mul_add(y, rem_r[s]);
         }
@@ -485,7 +491,7 @@ impl Bank {
         // Spread initial phases (golden-ratio sequence) so partials that share a pitch do not
         // start in phase and spike.
         let phase = (0..n).map(|i| (i as f32 * 0.618_034).fract() - 0.5).collect();
-        Bank { n, phase, inc: z(), beta: z(), al: z(), ar: z(), inc_t: z(), beta_t: z(), al_t: z(), ar_t: z(), k: 0.001 }
+        Bank { n, phase, inc: z(), beta: z(), al: z(), ar: z(), inc_t: z(), beta_t: z(), al_t: z(), ar_t: z(), k: 0.001, k_inc: 0.001 }
     }
 
     /// Add the next `out_l.len()` samples of the bank into out_l / out_r, with `kernel`.
@@ -511,6 +517,8 @@ pub struct Sonifier {
     pub sr: f32,
     pub kernel: Kernel,
     dirs: Vec<Vec3>,
+    /// Last quantized note per bin (for hysteresis).
+    note: Vec<f32>,
     on: bool,
     primed: bool,
     /// Samples rendered since the voice was switched off (to stop computing once silent).
@@ -521,7 +529,7 @@ pub struct Sonifier {
 impl Sonifier {
     pub fn new(sr: f32) -> Sonifier {
         Sonifier {
-            bank: Bank::new(NBINS), sr, kernel: Kernel::best(), dirs: (0..NBINS).map(bin_dir).collect(),
+            bank: Bank::new(NBINS), sr, kernel: Kernel::best(), dirs: (0..NBINS).map(bin_dir).collect(), note: vec![f32::NAN; NBINS],
             on: false, primed: false, off_samples: 0.0, tau: 0.05,
         }
     }
@@ -532,6 +540,10 @@ impl Sonifier {
         let b = &mut self.bank;
         self.tau = p.smoothing.max(1e-4);
         b.k = 1.0 - (-1.0 / (self.tau * self.sr)).exp();
+        // Pitch glides 10x faster when quantized (notes step, with a short portamento), at the
+        // full smoothing time when continuous.
+        let glide = if p.quantize { 0.1 * self.tau } else { self.tau };
+        b.k_inc = 1.0 - (-1.0 / (glide * self.sr)).exp();
         let on = p.enable && d.total > 0 && p.gain > 0.0;
         if on != self.on { self.off_samples = 0.0; }
         self.on = on;
@@ -553,8 +565,14 @@ impl Sonifier {
             let x = (0.45 * h + 0.45 * rho + 0.1 * bin.rough.min(1.0)).clamp(0.0, 1.0);
             let mut note = p.base + p.span * x;
             if p.quantize {
-                let n = note.round() as i32;
+                let cont = note;
+                let n = cont.round() as i32;
                 note = (p.key + p.scale.snap(n - p.key)) as f32;
+                // Hysteresis: a bin sitting between two scale notes would otherwise trill as the
+                // form breathes. Move only when the new note is ≥ 0.4 semitone closer.
+                let last = self.note[i];
+                if last.is_finite() && note != last && (cont - note).abs() + 0.4 > (cont - last).abs() { note = last; }
+                self.note[i] = note;
             }
             let hz = (440.0 * ((note - 69.0) / 12.0).exp2()).min(nyq);
             b.inc_t[i] = hz / self.sr;
@@ -632,6 +650,7 @@ mod tests {
             b.inc[i] = rnd() * 0.05;
         }
         b.k = 0.01;
+        b.k_inc = 0.05;
         b
     }
 

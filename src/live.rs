@@ -5,6 +5,11 @@
 //! * `Player`: loops a WAV through the default output device (cpal). The playback position is
 //!   the scene clock, so visuals stay locked to what you hear. Pause / seek / mute.
 //!   Without an output device it falls back to a silent wall clock with the same transport.
+//! * `VoiceSender` / `VoiceRx`: the sonify voice. The render thread publishes each frame's
+//!   surface descriptor + Lua knobs through a lock-free triple buffer; the output callback
+//!   picks up the newest one, updates the oscillator targets and mixes the voice into the
+//!   music. Nothing in the voice path locks or allocates on the audio thread (all buffers are
+//!   sized before the stream starts).
 //! * `MicAnalyzer`: live input via cpal, analyzed in fixed 60 Hz hops with a streaming version of
 //!   the offline features (adaptive peak normalization instead of the 99th percentile).
 use std::{
@@ -17,7 +22,11 @@ use std::{
 use anyhow::{bail, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::audio::{self, Features};
+use crate::{
+    audio::{self, Features},
+    sonify::{Sonifier, SonifyParams, SurfaceDescriptor},
+    triple::{triple, Reader, Writer},
+};
 
 /// Analysis rate for live lookup (features per second of audio).
 pub const ANALYSIS_FPS: f32 = 60.0;
@@ -84,14 +93,15 @@ pub struct Player {
 
 impl Player {
     /// Load `wav` and start looping it. Falls back to a silent clock if no output device works.
-    pub fn start(wav: &Path) -> anyhow::Result<Player> {
+    /// `voice` (optional) is mixed on top of the music in the same output callback.
+    pub fn start(wav: &Path, voice: Option<VoiceRx>) -> anyhow::Result<Player> {
         let (samples, rate) = read_stereo(wav)?;
         let frames = samples.len() / 2;
         anyhow::ensure!(frames > 0, "{}: empty audio", wav.display());
         let shared = Arc::new(Mutex::new(Transport { pos: 0.0, stamp: Instant::now(), paused: false }));
         let muted = Arc::new(AtomicBool::new(false));
         let mut p = Player { shared, muted, frames, rate: rate as f64, max_ahead: 0.05, _stream: None };
-        match open_output(Arc::new(samples), rate, p.shared.clone(), p.muted.clone()) {
+        match open_output(Arc::new(samples), rate, p.shared.clone(), p.muted.clone(), voice) {
             Ok((stream, buf_secs)) => { p.max_ahead = buf_secs.max(0.01) * 2.0; p._stream = Some(stream); }
             Err(e) => {
                 eprintln!("[run] no audio output ({e:#}); visuals follow a silent clock");
@@ -138,7 +148,7 @@ fn read_stereo(path: &Path) -> anyhow::Result<(Vec<f32>, u32)> {
     Ok((out, rate))
 }
 
-fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transport>>, muted: Arc<AtomicBool>)
+fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transport>>, muted: Arc<AtomicBool>, voice: Option<VoiceRx>)
     -> anyhow::Result<(cpal::Stream, f64)> {
     let dev = cpal::default_host().default_output_device().context("no default output device")?;
     let cfg = dev.default_output_config()?;
@@ -147,9 +157,11 @@ fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transpor
     let chans = cfg.channels() as usize;
     let step = src_rate as f64 / out_rate;
     let frames = samples.len() / 2;
+    let mut voice = voice.map(|v| v.prepared(out_rate as f32));
     let stream = dev.build_output_stream(
         &cfg.into(),
         move |data: &mut [f32], _| {
+            // (The transport mutex is only ever held for a few instructions by the UI thread.)
             let mut s = shared.lock().unwrap();
             if s.paused { data.fill(0.0); return; }
             let mute = muted.load(Ordering::Relaxed);
@@ -165,6 +177,8 @@ fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transpor
                 s.pos = wrap_time(s.pos + step, frames as f64);
             }
             s.stamp = Instant::now();
+            drop(s);
+            if let Some(v) = voice.as_mut() { v.mix(data, chans); }
         },
         |e| eprintln!("[audio] output error: {e}"),
         None,
@@ -172,6 +186,95 @@ fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transpor
     stream.play()?;
     // Rough buffer length for clock extrapolation: assume ~1024 frames if unknown.
     Ok((stream, 1024.0 / out_rate))
+}
+
+// ───────────────────────────── sonify voice (render thread -> audio thread) ─────────────────────────────
+
+/// One frame's worth of voice control: the Lua knobs and the surface descriptor.
+#[derive(Clone)]
+pub struct VoiceFrame {
+    pub params: SonifyParams,
+    pub surface: SurfaceDescriptor,
+}
+
+/// Render-thread end: publish once per video frame; V toggles `on`.
+pub struct VoiceSender {
+    writer: Writer<VoiceFrame>,
+    pub on: Arc<AtomicBool>,
+}
+
+impl VoiceSender {
+    pub fn send(&mut self, params: &SonifyParams, surface: &SurfaceDescriptor) {
+        self.writer.write(|f| { f.params = *params; f.surface.copy_from(surface); });
+    }
+    /// Flip the host-side switch (on top of Lua's `sonify.enable`). Returns the new state.
+    pub fn toggle(&self) -> bool { !self.on.fetch_xor(true, Ordering::Relaxed) }
+}
+
+/// Audio-thread end. `prepared` allocates everything before the stream starts.
+pub struct VoiceRx {
+    reader: Reader<VoiceFrame>,
+    on: Arc<AtomicBool>,
+    sonifier: Option<Sonifier>,
+    l: Vec<f32>,
+    r: Vec<f32>,
+}
+
+/// Max frames mixed per inner chunk (callbacks larger than this are processed in pieces).
+const VOICE_CHUNK: usize = 1024;
+
+pub fn voice_channel(on: bool) -> (VoiceSender, VoiceRx) {
+    let init = VoiceFrame { params: SonifyParams::default(), surface: SurfaceDescriptor::default() };
+    let (writer, reader) = triple(init);
+    let on = Arc::new(AtomicBool::new(on));
+    (VoiceSender { writer, on: on.clone() }, VoiceRx { reader, on, sonifier: None, l: Vec::new(), r: Vec::new() })
+}
+
+impl VoiceRx {
+    fn prepared(mut self, sr: f32) -> Self {
+        self.sonifier = Some(Sonifier::new(sr));
+        self.l = vec![0.0; VOICE_CHUNK];
+        self.r = vec![0.0; VOICE_CHUNK];
+        self
+    }
+
+    /// Add the voice to an interleaved output buffer. Real-time safe: no locks, no allocation.
+    fn mix(&mut self, data: &mut [f32], chans: usize) {
+        let Some(son) = self.sonifier.as_mut() else { return };
+        if let Some(f) = self.reader.read() {
+            let mut p = f.params;
+            p.enable &= self.on.load(Ordering::Relaxed);
+            son.set_targets(&f.surface, &p);
+        }
+        for chunk in data.chunks_mut(VOICE_CHUNK * chans) {
+            let n = chunk.len() / chans;
+            let (l, r) = (&mut self.l[..n], &mut self.r[..n]);
+            l.fill(0.0);
+            r.fill(0.0);
+            son.render(l, r);
+            if son.idle() { return; }
+            for (j, fr) in chunk.chunks_mut(chans).enumerate() {
+                if chans == 1 { fr[0] += 0.5 * (l[j] + r[j]); } else { fr[0] += l[j]; fr[1] += r[j]; }
+            }
+        }
+    }
+}
+
+/// `--mic` mode has no music stream: open an output stream that plays only the voice.
+pub fn voice_only_output(voice: VoiceRx) -> anyhow::Result<cpal::Stream> {
+    let dev = cpal::default_host().default_output_device().context("no default output device")?;
+    let cfg = dev.default_output_config()?;
+    if cfg.sample_format() != cpal::SampleFormat::F32 { bail!("output format {:?} unsupported", cfg.sample_format()); }
+    let chans = cfg.channels() as usize;
+    let mut voice = voice.prepared(cfg.sample_rate().0 as f32);
+    let stream = dev.build_output_stream(
+        &cfg.into(),
+        move |data: &mut [f32], _| { data.fill(0.0); voice.mix(data, chans); },
+        |e| eprintln!("[audio] output error: {e}"),
+        None,
+    )?;
+    stream.play()?;
+    Ok(stream)
 }
 
 /// Ensure the WAV exists (synthesizing the default track if not), then analyze it for lookup.
