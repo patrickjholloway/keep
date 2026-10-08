@@ -83,8 +83,8 @@ Unknown parameter or source names are script errors (the last good frame is kept
 | `sync.depth` · `freq` · `speed` · `block` | 0 · 24 · 1.5 · 0.35 | max delay (fraction of a line) · bands per frame · re-roll rate (Hz) · fraction of bands that tear |
 | `ring.depth` · `freq` · `speed` · `chroma` | 0 · 3.37 · 0.5 · 0.6 | 0..1 · carrier cycles per scanline · drift (Hz) · R/G/B carrier phase offset (rad) |
 | `smear.depth` · `feedback` · `dir` · `axis` | 0 · 0.95 · 1 · 0 | trail mix · IIR coefficient a · +1 forward / −1 back · 0 rows, 1 columns |
-| `dispersion.depth` · `mode` · `angle` | 0 · 0 · 0 | px of spread at 1080p · 0 radial / 1 directional · direction (rad) |
-| `warp.amount` · `zoom` · `a b c d` (complex) | 0 · 1 · 1, 0, 0, 1 | blend toward the Möbius map · output-plane scale · coefficients |
+| `dispersion.depth` · `mode` · `angle` · `min` | 0 · 0 · 0 · 0 | px of spread at 1080p (radial: peaks near the silhouette) · 0 radial / 1 directional · direction (rad) · minimum split (px) |
+| `warp.amount` · `zoom` · `twist` · `radius` · `a b c d` (complex) | 0 · 1 · 0 · 0.6 · 1, 0, 0, 1 | blend toward the Möbius map · output-plane scale · swirl at the centre (rad, × amount) · swirl falloff radius · coefficients |
 | `spectral.mix` · `lo` · `hi` · `atten` · `phase` · `seed` · `soft` · `outside` | 0 · .02 · .12 · 1 · 0 · 0 · .01 · 1 | wet mix · band (cycles/px) · gain cut in band · ghost-echo strength · echo direction · band edge · gain outside band |
 | `crush.depth` · `hold` | 0 · 1 | quantization (0 off .. 1 = 2 levels) · sample-and-hold block (px) |
 
@@ -156,7 +156,7 @@ warp → spectral → crush. Each shader opens with a longer explanation of its 
    power `M^amount`, so e.g. a rotation preset turns by `amount·θ` instead of collapsing). The exemplar uses an *elliptic* map with fixed points `±p`
    (a rotation conjugated by `(z − p)/(z + p)`): `a = d = 1`, `b = −i p tan(θ/2)`,
    `c = −i tan(θ/2)/p` — the picture swirls around two still points; since the centre is
-   magnified by `1 + tan²(θ/2)`, the same envelope is also patched into `warp.zoom`.
+   magnified by `1 + tan²(θ/2)`, the same envelope is also patched into `warp.zoom` (capped at 1.15). On top, `warp.twist` rotates the lookup by `twist·amount·exp(−r²/radius²)`, a swirl that wrings the form around its centre.
 6. **Spectral gate** (`glitch_spectral.comp`) — the frame is box-filtered down to a 1024×512 grid,
    mirrored into a 2048×1024 grid (even extension: no wrap seam at the frame edges), and
    2D-FFT'd with a radix-2 **Stockham** FFT (one dispatch per butterfly stage, ping-ponging two
@@ -175,7 +175,7 @@ warp → spectral → crush. Each shader opens with a longer explanation of its 
    tested against a naive DFT.
 7. **Bitcrush / sample-and-hold** (`glitch_crush.comp`) — decimation holds one sample per
    `hold × hold` block (a lower sample rate, in 2D); quantization snaps brightness to
-   `2^(8 − 7·depth)` mid-tread levels (black stays 0) (a lower bit depth) in the tone-compressed domain `c/(1 + c)`, so
+   `2^(8 − 7·depth)` mid-tread levels (black stays 0) (a lower bit depth); luminance is quantized and RGB rescaled with it, so the hue survives, in the tone-compressed domain `c/(1 + c)`, so
    unbounded HDR values posterize evenly.
 
 The `mean_luma` source comes from `glitch_stats.comp`: one invocation averages a 64×36 grid of
@@ -185,7 +185,7 @@ latency, like an envelope follower patched back into a synth.
 How the exemplar plays them (`choreograph_glitch` in `scripts/exemplar.lua`): the intro is
 clean; in the groove, strong onsets fire ~0.15 s sync-slip bursts and kicks push radial
 dispersion; the build grows smear and a rising ring-mod carrier and ends with an 8th-note
-bitcrush/sample-and-hold stutter; the drop downbeat opens the Möbius swirl and the spectral
+bitcrush/sample-and-hold stutter; in the drop every kick also fires a short vertical smear burst; the drop downbeat opens the Möbius twist and the spectral
 ghosting, which relax over two bars and return smaller every 4 bars; every 8 bars the drop ends
 in a half-bar stutter; bars 28–30 are a clean breather, and the outro is clean.
 

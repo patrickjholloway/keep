@@ -208,6 +208,8 @@ impl ParticlePass {
 pub struct TonemapPush {
     /// x = exposure multiplier, y = onset (beat ring), z = time (grain), w = bass (glow tint).
     pub knobs: [f32; 4],
+    /// x = beat-ring gain (1 = full), y = beat-ring dispersion (px at 1080p).
+    pub ring: [f32; 4],
 }
 
 /// HDR -> 8-bit. Owns its own descriptor set (binding 0 = HDR storage image) so it is
@@ -234,7 +236,7 @@ impl TonemapPass {
             let pool = d.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None)?;
             let sl = [set_layout];
             let set = d.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&sl))?[0];
-            let push = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 16 }];
+            let push = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 32 }];
             let layout = d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sl).push_constant_ranges(&push), None)?;
             let pipeline = graphics_pipeline(ctx, layout, shaders::TONEMAP_VERT, shaders::TONEMAP_FRAG, out_format, false)?;
             Ok(TonemapPass { set_layout, pool, set, layout, pipeline })

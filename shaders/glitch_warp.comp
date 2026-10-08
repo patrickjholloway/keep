@@ -27,6 +27,12 @@ void main() {
     float unit = 0.5 * float(size.y);
     vec2 w = (vec2(px) - half_size) / unit * g.warp_m.y;      // output point (zoom scales it)
     vec2 a = g.warp_ab.xy, b = g.warp_ab.zw, c = g.warp_cd.xy, d = g.warp_cd.zw;
+    // TWIST: a swirl (non-conformal) layered on the Möbius map, so the downbeat reads as a
+    // turn, not a zoom. Rotate the lookup by θ(r) = twist·amount·exp(−r²/R²): strongest at the
+    // centre, fading to nothing at the frame edge, so the form wrings around itself.
+    float r2 = dot(w, w);
+    float th = g.warp_m.z * g.warp_m.x * exp(-r2 / max(g.warp_m.w * g.warp_m.w, 1e-4));
+    w = cmul(w, vec2(cos(th), sin(th)));
     vec2 z = cdiv(cmul(d, w) - b, a - cmul(c, w));            // f^-1(w)
     vec2 q = z * unit + half_size;
     vec3 col = bilinear(q, size);

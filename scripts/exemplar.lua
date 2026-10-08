@@ -25,7 +25,7 @@ local G = glitch
 --   build            smear (comet trails) and a rising ring-mod carrier grow with the riser;
 --                    the last bar stutters (bitcrush + sample-and-hold on 8th notes)
 --   drop downbeat    Möbius warp + spectral phase scramble that relax over ~2 bars
---   drop             kicks disperse, every 4 bars the warp swirls back, every 8 bars a
+--   drop             kicks disperse and fire short vertical smear bursts, every 4 bars the warp swirls back, every 8 bars a
 --                    half-bar bitcrush stutter; bar 28-30 is left clean as a breather
 --   outro            clean again
 local BAR = 240 / 122
@@ -54,7 +54,7 @@ G.set("smear.axis", 1)                     -- vertical trails: distinct from the
 --   b = -i p tan(θ/2),  c = -i tan(θ/2) / p
 -- so the picture swirls around two still points (a "dipole"). warp.amount blends b, c
 -- toward 0, which is the same as shrinking θ: amount 0.5 = half the twist.
-local P, THETA = 0.55, math.rad(70)   -- centre magnification |f'(0)| = 1 + tan²(θ/2) ≈ 1.5
+local P, THETA = 0.55, math.rad(18)   -- mild: the full-strength dipole displaced and magnified the form ~2x (cropping it); the twist below carries the motion
 local TT = math.tan(THETA / 2)
 G.set("warp.a", 1, 0)
 G.set("warp.b", 0, -P * TT)
@@ -62,14 +62,20 @@ G.set("warp.c", 0, -TT / P)
 G.set("warp.d", 1, 0)
 -- the map magnifies the centre by 1 + tan²(θ/2); zoom the output plane by the same amount
 -- (another cable from the same envelope) so the form keeps its size and only the swirl shows
-G.patch("drop_env", "warp.zoom", TT * TT)
+-- capped at 1.15 so the form never crops out of the frame on the downbeat
+G.patch("drop_env", "warp.zoom", math.min(TT * TT, 0.15))
+-- the visible motion is the TWIST: a Gaussian swirl (radius 0.7 of the half-height) that wrings
+-- the form around its centre by up to ~100° on the downbeat, unwinding as drop_env relaxes
+G.patch("drop_env", "warp.twist", 1.75)
+G.set("warp.radius", 0.7)
 G.set("spectral.lo", 0.05)
 G.set("spectral.hi", 0.22)
 G.set("spectral.atten", 0.35)
-G.set("spectral.phase", 0.8)
+G.set("spectral.phase", 1.0)
 G.set("spectral.soft", 0.06)              -- gentle band edges: less ringing in empty space
 
 local tear_t, last_tear_onset = -10, 0
+local kick_t, last_kick = -10, 0
 local function choreograph_glitch(t, f, kick)
   local bar = t / BAR
   local form = bar % 36
@@ -90,19 +96,25 @@ local function choreograph_glitch(t, f, kick)
 
   -- dispersion on kicks: pixels of rainbow split at the frame edge
   G.source("kick", active * kick * (40 * groove + 40 * ramp + 90 * drop))
+  G.set("dispersion.min", 6)                  -- every kick is a visible split, never a faint fringe
 
   -- build: smear and ring-mod carrier grow with the riser
-  G.source("smear_env", ramp * (0.3 * prog * prog + 0.2 * prog))
-  G.set("smear.feedback", 0.9 + 0.065 * prog)
+  -- drop: each kick fires a vertical smear burst at 0.4 of the build peak (0.5) with a 0.25 s
+  -- tail, so the build's comb texture carries into the drop instead of vanishing at the peak
+  if kick > 0.5 and last_kick <= 0.5 then kick_t = t end
+  last_kick = kick
+  local burst = drop * (1 - breather) * math.exp(-(t - kick_t) / 0.25)
+  G.source("smear_env", ramp * (0.3 * prog * prog + 0.2 * prog) + 0.4 * 0.5 * burst)
+  G.set("smear.feedback", 0.9 + 0.065 * prog + 0.05 * drop)
   G.source("ring_env", 0.55 * prog * prog)
   G.set("ring.freq", 1.37 + 9 * prog * prog)               -- non-integer: stripes lean
 
   -- drop downbeat: warp + spectral scramble, relaxing over ~2 bars; every 4 bars a smaller swirl
   local since_drop = (form - 20) * BAR
-  local big = drop * math.exp(-math.max(since_drop, 0) / (1.2 * BAR))
+  local big = drop * math.exp(-math.max(since_drop, 0) / (2 * BAR))
   local phrase = (form - 20) % 4
   local swirl = drop * (1 - breather) * (form >= 24 and 1 or 0) * math.exp(-phrase * BAR / 0.5) * 0.45
-  G.source("drop_env", math.min(1, 0.75 * big + swirl))
+  G.source("drop_env", math.min(1, 1.0 * big + swirl))
   G.set("spectral.seed", math.floor(t * 122 / 60))          -- new echo direction every beat
 
   -- bitcrush stutters: last bar of the build on 8th notes, last half-bar of every 8 in the drop

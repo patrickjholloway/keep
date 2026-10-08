@@ -5,7 +5,10 @@
 // The HDR image is read as a storage image (imageLoad), so "blur" here is a sparse gather of
 // explicit texel loads rather than filtered sampling.
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D hdr;
-layout(push_constant) uniform Push { vec4 knobs; } pc;   // x = exposure, y = beat rise, z = time, w = bass
+layout(push_constant) uniform Push {
+    vec4 knobs;    // x = exposure, y = beat rise, z = time, w = bass
+    vec4 ring;     // x = beat-ring gain (dims under stutters / the drop), y = ring dispersion (px @1080p)
+} pc;
 layout(location = 0) out vec4 o_color;
 
 // ACES filmic fit (Narkowicz). Applied to LUMINANCE only, below, so it can't bleach hue.
@@ -62,8 +65,13 @@ void main() {
     float rise = clamp(pc.knobs.y, 0.0, 1.0);
     float age = 1.0 - rise;                                  // 0 at the rise, -> 1 as it decays
     float ringr = 0.22 + 0.5 * age;
-    float ring = exp(-pow((rd - ringr) / 0.025, 2.0)) * rise * rise;
-    c += ring * vec3(0.10, 0.12, 0.30);
+    // The ring is drawn here, after the glitch chain, so it is told what the chain is doing:
+    // ring.x dims it under stutters and the drop envelope, ring.y splits it per channel like
+    // the kick dispersion (red in, blue out — the same sign as glitch_disp.comp's k(λ)).
+    vec3 rshift = vec3(-0.30, 0.0, 0.70) * (pc.ring.y / 1080.0);
+    vec3 rq = (vec3(rd) - (ringr + rshift)) / 0.025;
+    vec3 ringc = exp(-rq * rq) * rise * rise * pc.ring.x;
+    c += ringc * vec3(0.10, 0.12, 0.30);
 
     c *= pc.knobs.x;
     float vig = 1.0 - 0.35 * dot(uv - 0.5, uv - 0.5) * 2.0;

@@ -37,13 +37,15 @@ pub struct GlitchParams {
     /// x = depth (0..1 trail mix), y = feedback a (0..0.999), z = direction (+1 →, -1 ←), w = unused.
     pub smear: [f32; 4],
     /// x = depth (pixels of red↔blue split at 1080p, at the frame edge for radial),
-    /// y = mode (0 radial, 1 directional), z = angle (radians, directional mode), w = unused.
+    /// y = mode (0 radial, 1 directional), z = angle (radians, directional mode), w = minimum
+    /// split (px at 1080p) whenever depth > 0, so a kick always reads as a colour split.
     pub disp: [f32; 4],
     /// Möbius coefficients a, b (complex, re/im) — already blended with identity by `warp.amount`.
     pub warp_ab: [f32; 4],
     /// Möbius coefficients c, d (complex, re/im).
     pub warp_cd: [f32; 4],
-    /// x = amount (0 = bypass), y = zoom (output z scale), zw unused.
+    /// x = amount (0 = bypass), y = zoom (output z scale), z = twist (radians of swirl at the
+    /// centre, scaled by amount), w = twist radius (Gaussian falloff, frame-height units).
     pub warp_m: [f32; 4],
     /// x = mix (0 = bypass), y = band lo, z = band hi (radial frequency, cycles/pixel of the
     /// working grid, 0..0.5·√2), w = attenuation in the band (0..1, can exceed 1 to invert).
@@ -95,8 +97,11 @@ pub const PARAMS: &[(&str, f32, f32, f32)] = &[
     ("dispersion.depth", 0.0, 0.0, 200.0),
     ("dispersion.mode", 0.0, 0.0, 1.0),
     ("dispersion.angle", 0.0, -100.0, 100.0),
+    ("dispersion.min", 0.0, 0.0, 64.0),
     ("warp.amount", 0.0, 0.0, 1.0),
     ("warp.zoom", 1.0, 0.05, 20.0),
+    ("warp.twist", 0.0, -12.0, 12.0),
+    ("warp.radius", 0.6, 0.05, 4.0),
     ("warp.a.re", 1.0, -100.0, 100.0),
     ("warp.a.im", 0.0, -100.0, 100.0),
     ("warp.b.re", 0.0, -100.0, 100.0),
@@ -287,10 +292,10 @@ pub fn resolve(desc: &GlitchDesc, t: f32, f: &Features, mean_luma: f32, frame: u
         sync: [g("sync.depth"), g("sync.freq"), g("sync.speed"), g("sync.block")],
         ring: [g("ring.depth"), g("ring.freq"), g("ring.speed"), g("ring.chroma")],
         smear: [g("smear.depth"), g("smear.feedback"), if g("smear.dir") < 0.0 { -1.0 } else { 1.0 }, if g("smear.axis") >= 0.5 { 1.0 } else { 0.0 }],
-        disp: [g("dispersion.depth"), g("dispersion.mode").round(), g("dispersion.angle"), 0.0],
+        disp: [g("dispersion.depth"), g("dispersion.mode").round(), g("dispersion.angle"), g("dispersion.min")],
         warp_ab: [m[0].0, m[0].1, m[1].0, m[1].1],
         warp_cd: [m[2].0, m[2].1, m[3].0, m[3].1],
-        warp_m: [amount, g("warp.zoom"), 0.0, 0.0],
+        warp_m: [amount, g("warp.zoom"), g("warp.twist"), g("warp.radius")],
         spec: [g("spectral.mix"), g("spectral.lo"), g("spectral.hi"), g("spectral.atten")],
         spec2: [g("spectral.phase"), g("spectral.seed"), g("spectral.soft"), g("spectral.outside")],
         crush: [g("crush.depth"), g("crush.hold").round(), 0.0, 0.0],
@@ -419,12 +424,24 @@ pub fn smear_run(x: &[f32], a: f32, depth: f32) -> Vec<f32> {
     }).collect()
 }
 
-/// Bitcrush quantizer (glitch_crush.comp): mid-rise L levels in the tone-compressed domain.
+/// Bitcrush quantizer (glitch_crush.comp): mid-tread L levels in the tone-compressed domain.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn crush_quantize(c: f32, levels: f32) -> f32 {
     let v = c / (1.0 + c);
     let v = ((v * (levels - 1.0)).round() / (levels - 1.0)).min((levels - 0.5) / levels);
     v / (1.0 - v)
+}
+
+/// Bitcrush a pixel (glitch_crush.comp): quantize its LUMINANCE and rescale the RGB by the
+/// same factor, so the hue (channel ratios) survives — posterized bands in the frame's own
+/// palette instead of per-channel rounding that throws out random saturated primaries.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn crush_pixel(c: [f32; 3], levels: f32) -> [f32; 3] {
+    const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+    let l = c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2];
+    if l <= 0.0 { return [0.0; 3]; }
+    let k = crush_quantize(l, levels) / l;
+    [c[0] * k, c[1] * k, c[2] * k]
 }
 
 /// Mirror (even) extension of a w×h image into a 2w×2h grid, as LOAD in glitch_spectral.comp
@@ -616,6 +633,17 @@ mod tests {
         for &c in &[0.05f32, 0.5, 2.0] {
             assert!((crush_quantize(c, 256.0) - c).abs() < 0.02 * (1.0 + c) * (1.0 + c));
         }
+    }
+
+    #[test]
+    fn crush_pixel_keeps_hue() {
+        // a dim orange at L = 4: per-channel rounding would split it into pure red; luminance
+        // quantization keeps the R:G:B ratios
+        let c = [0.9f32, 0.45, 0.1];
+        let q = crush_pixel(c, 4.0);
+        assert!(q[0] > 0.0);
+        assert!(close(q[1] / q[0], 0.5, 1e-4) && close(q[2] / q[0], c[2] / c[0], 1e-4));
+        assert_eq!(crush_pixel([0.0; 3], 2.0), [0.0; 3]);
     }
 
     #[test]

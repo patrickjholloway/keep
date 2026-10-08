@@ -235,7 +235,7 @@ impl Renderer {
             S::COLOR_ATTACHMENT_OUTPUT, A::NONE,
             S::COLOR_ATTACHMENT_OUTPUT, A::COLOR_ATTACHMENT_WRITE,
         );
-        self.tonemap.record(ctx, cmd, out_view, extent, TonemapPush { knobs: self.tonemap_knobs });
+        self.tonemap.record(ctx, cmd, out_view, extent, TonemapPush { knobs: self.tonemap_knobs, ring: beat_ring_knobs(&self.glitch) });
     }
 
     /// Render one frame into the offscreen target and block until its RGBA pixels are readable.
@@ -335,4 +335,14 @@ impl Drop for Renderer {
         self.seeds.destroy(ctx);
         self.scene_ubo.destroy(ctx);
     }
+}
+
+/// The beat ring is composited in the tonemap, after the glitch chain, so it would otherwise
+/// sit untouched over every effect. Dim it to 40% under a stutter (crush) or the drop's warp
+/// envelope, and hand it the kick dispersion so it splits with the particles.
+fn beat_ring_knobs(g: &crate::glitch::GlitchParams) -> [f32; 4] {
+    let stutter: f32 = if g.crush_on() { 1.0 } else { 0.0 };
+    let dim = stutter.max(g.warp_m[0].clamp(0.0, 1.0)).max(g.spec[0].clamp(0.0, 1.0));
+    let disp = if g.disp_on() { g.disp[0].max(g.disp[3]) } else { 0.0 };
+    [1.0 - 0.6 * dim, disp, 0.0, 0.0]
 }
