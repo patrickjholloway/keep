@@ -10,7 +10,8 @@
 // kept — see FILTER below), then inverse-transforms.
 //
 // Pipeline (this one shader, selected by pc.p.x = mode; the CPU records the sequence):
-//   0 LOAD       resample the frame onto the 1024×512 working grid (re = rgb, im = 0)
+//   0 LOAD       box-filter the frame down to IW×IH = 1024×512 and write its MIRROR (even)
+//                extension into the 2048×1024 FFT grid (re = rgb, im = 0). See EDGES below.
 //   1 STAGE      one radix-2 Stockham butterfly stage along rows or columns (log2 N of them)
 //   2 FILTER     per frequency bin: band gain + phase scramble
 //   3 COMPOSITE  out = orig + mix · (up(filtered) − up(down(orig)))
@@ -25,11 +26,27 @@
 // with the conjugate twiddle and a 1/(N·M) scale at the end. src/glitch.rs has the CPU twin.
 // The gains and phase edits are symmetric (gain even, phase odd in f), so the inverse is real;
 // we keep the real part, the imaginary part is only rounding noise.
+//
+// EDGES. A DFT treats its grid as a torus: the bottom row sits next to the top row. A frame
+// whose top and bottom differ (sky over ground) has a step at that seam, a band cut rings
+// across it, and the phase echo (a circular shift by D) copies bottom-edge content onto the
+// top rows. So the frame is mirrored into a grid twice its size in each axis:
+//     grid(x, y) = img(mirror(x), mirror(y)),  mirror(x) = x < IW ? x : 2·IW − 1 − x
+// The periodic extension of that is continuous everywhere (a DCT-II style even extension), so
+// there is no seam to ring on, and an echo that runs off one edge reflects back instead of
+// wrapping round to the opposite side. COMPOSITE only reads the original IW×IH quadrant.
+//
+// UNITS. lo / hi / soft are cycles per working-grid pixel measured on the VERTICAL axis
+// (IH grid px = frame height). Horizontal frequencies are rescaled by the frame's aspect, so
+// the band is a circle in image space whatever the frame shape, and the echo offset D is an
+// isotropic distance (26 vertical grid px ≈ 55 px at 1080p).
 #include "glitch_common.glsl"
 layout(local_size_x = 256) in;
 
-#define FN 1024u   // working grid width  (power of two)
-#define FM 512u    // working grid height (power of two)
+#define FN 2048u   // FFT grid width  (power of two) = 2·IW (mirror extension)
+#define FM 1024u   // FFT grid height (power of two) = 2·IH
+#define IW 1024    // image quadrant width
+#define IH 512     // image quadrant height
 
 Cplx rd(uint i) {
     if ((pc.p.z & 4u) != 0u) { return fb[i]; }
@@ -42,16 +59,25 @@ void wr_same(uint i, Cplx v) {           // in-place filter
     if ((pc.p.z & 4u) != 0u) { fb[i] = v; } else { fa[i] = v; }
 }
 
-// Frame -> working grid: bilinear sample of the image at grid cell (i, j).
+// Frame -> working grid: box prefilter over the cell's footprint (one grid cell covers
+// size/(IW, IH) ≈ 1.9×2.1 frame px at 1080p) as 4 bilinear taps at ±¼ cell. A single bilinear
+// tap would skip about half the source rows and columns and alias fine detail into the band.
 vec3 down(ivec2 cell, ivec2 size) {
-    cell = clamp(cell, ivec2(0), ivec2(int(FN) - 1, int(FM) - 1));
-    vec2 p = (vec2(cell) + 0.5) * vec2(size) / vec2(FN, FM) - 0.5;
-    return bilinear(clamp(p, vec2(0.0), vec2(size - 1)), size);
+    cell = clamp(cell, ivec2(0), ivec2(IW - 1, IH - 1));
+    vec2 step_px = vec2(size) / vec2(IW, IH);
+    vec2 p = (vec2(cell) + 0.5) * step_px - 0.5;
+    vec2 hi = vec2(size - 1);
+    vec2 o = 0.25 * step_px;
+    return 0.25 * (bilinear(clamp(p + vec2(-o.x, -o.y), vec2(0.0), hi), size)
+                 + bilinear(clamp(p + vec2( o.x, -o.y), vec2(0.0), hi), size)
+                 + bilinear(clamp(p + vec2(-o.x,  o.y), vec2(0.0), hi), size)
+                 + bilinear(clamp(p + vec2( o.x,  o.y), vec2(0.0), hi), size));
 }
 vec3 grid_re(ivec2 cell) {
-    cell = clamp(cell, ivec2(0), ivec2(int(FN) - 1, int(FM) - 1));
+    cell = clamp(cell, ivec2(0), ivec2(IW - 1, IH - 1));
     return rd(uint(cell.y) * FN + uint(cell.x)).re.rgb;
 }
+int mirror(int x, int n) { return x < n ? x : 2 * n - 1 - x; }
 
 void main() {
     uint mode = pc.p.x;
@@ -60,7 +86,7 @@ void main() {
 
     if (mode == 0u) {                                    // LOAD
         if (id >= FN * FM) return;
-        ivec2 cell = ivec2(int(id % FN), int(id / FN));
+        ivec2 cell = ivec2(mirror(int(id % FN), IW), mirror(int(id / FN), IH));
         fa[id] = Cplx(vec4(down(cell, size), 0.0), vec4(0.0));
     } else if (mode == 1u) {                             // STAGE
         bool cols = (pc.p.z & 1u) != 0u;
@@ -90,6 +116,9 @@ void main() {
         // bins above N/2 are negative frequencies
         float fx = (kx <= FN / 2u ? float(kx) : float(kx) - float(FN)) / float(FN);
         float fy = (ky <= FM / 2u ? float(ky) : float(ky) - float(FM)) / float(FM);
+        // isotropic units: cycles per grid px on the vertical axis (see UNITS above). One
+        // vertical grid px is size.y/IH frame px; one horizontal one is size.x/IW.
+        fx *= (float(size.y) / float(IH)) / (float(size.x) / float(IW));
         float f = length(vec2(fx, fy));
         if (f == 0.0) return;                            // DC (the mean) always passes
         float soft = g.spec2.z;
@@ -104,14 +133,14 @@ void main() {
         // `seed` picks the echo direction (golden-angle steps, so successive seeds spread out).
         float ang_d = g.spec2.y * 2.39996;
         vec2 D = 26.0 * vec2(cos(ang_d), sin(ang_d));
-        float theta = g.spec2.x * band * PI * sin(2.0 * PI * dot(vec2(fx * float(FN), fy * float(FM)) / vec2(FN, FM), D));
+        float theta = g.spec2.x * band * PI * sin(2.0 * PI * dot(vec2(fx, fy), D));
         vec2 w = gain * vec2(cos(theta), sin(theta));
         Cplx v = rd(id);
         wr_same(id, Cplx(vec4(v.re.rgb * w.x - v.im.rgb * w.y, 0.0), vec4(v.re.rgb * w.y + v.im.rgb * w.x, 0.0)));
     } else {                                             // COMPOSITE (one thread per image pixel)
         if (id >= uint(size.x * size.y)) return;
         ivec2 px = ivec2(int(id % uint(size.x)), int(id / uint(size.x)));
-        vec2 u = (vec2(px) + 0.5) * vec2(FN, FM) / vec2(size) - 0.5;   // pixel -> grid coords
+        vec2 u = (vec2(px) + 0.5) * vec2(IW, IH) / vec2(size) - 0.5;   // pixel -> grid coords
         vec2 fl = floor(u);
         vec2 t = u - fl;
         ivec2 c = ivec2(fl);

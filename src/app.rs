@@ -108,6 +108,7 @@ impl App {
             // Out of date (resize): rebuild at the window's current size and try next frame.
             unsafe { gpu.renderer.ctx.device.device_wait_idle()? };
             gpu.swapchain.recreate(&gpu.renderer.ctx, size.width, size.height)?;
+            gpu.renderer.invalidate_image_bindings();
         }
         self.frames += 1;
         Ok(())

@@ -104,8 +104,8 @@ fn set(d: &mut crate::glitch::GlitchDesc, name: &str, v: f32) {
 
 #[test]
 fn spectral_gate_identity_roundtrips_on_gpu() {
-    // At exactly the FFT working resolution (1024×512) the resample is the identity, so a
-    // spectral gate that keeps every band (atten 0, gain 1 outside, no phase scramble) at mix 1
+    // At exactly the FFT working-image resolution (1024×512) the composite subtracts the same
+    // down(orig) it filtered, so a spectral gate that keeps every band (atten 0, gain 1 outside, no phase scramble) at mix 1
     // must give back the clean frame: forward 2D FFT -> inverse 2D FFT == identity.
     if !have_gpu() { eprintln!("skipping: no KEEP_VULKAN_LIB"); return; }
     let _gpu = GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -114,14 +114,14 @@ fn spectral_gate_identity_roundtrips_on_gpu() {
     set(&mut d, "spectral.atten", 0.0);
     let g = crate::glitch::resolve(&d, 0.0, &Default::default(), 0.0, 0);
     assert!(g.spec_on());
-    let (clean, out) = render_pair(super::glitch::FFT_N, super::glitch::FFT_M, g);
+    let (clean, out) = render_pair(super::glitch::FFT_IW, super::glitch::FFT_IH, g);
     let max = clean.iter().zip(&out).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
     eprintln!("fft roundtrip max 8-bit diff {max}");
     assert!(max <= 3, "GPU FFT roundtrip differs by {max}");
     // and removing a band really changes the picture
     set(&mut d, "spectral.atten", 1.0);
     let g = crate::glitch::resolve(&d, 0.0, &Default::default(), 0.0, 0);
-    let (clean, out) = render_pair(super::glitch::FFT_N, super::glitch::FFT_M, g);
+    let (clean, out) = render_pair(super::glitch::FFT_IW, super::glitch::FFT_IH, g);
     let diff: u64 = clean.iter().zip(&out).map(|(a, b)| (*a as i64 - *b as i64).unsigned_abs()).sum();
     assert!(diff > 10_000, "band-stop should alter the frame ({diff})");
 }

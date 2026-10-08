@@ -11,7 +11,8 @@
 // We do BACKWARD mapping: for each output pixel w we evaluate the inverse
 //     f⁻¹(w) = (d w − b) / (−c w + a)
 // and sample the input there, so every output pixel gets exactly one value (no holes).
-// The CPU (src/glitch.rs) blends the coefficients with the identity by warp.amount.
+// The CPU (src/glitch.rs) blends the coefficients with the identity by warp.amount, keeping
+// ad − bc away from 0 (a singular map would send every pixel to one point).
 #include "glitch_common.glsl"
 layout(local_size_x = 16, local_size_y = 16) in;
 

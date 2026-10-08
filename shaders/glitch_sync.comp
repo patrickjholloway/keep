@@ -14,15 +14,21 @@
 #include "glitch_common.glsl"
 layout(local_size_x = 16, local_size_y = 16) in;
 
-vec3 at_signal(float s, int W, int N) {
-    // fractional signal position -> lerp between the two neighbouring samples
-    float s0 = floor(s);
-    float t = s - s0;
-    int i0 = clamp(int(s0), 0, N - 1);
-    int i1 = clamp(int(s0) + 1, 0, N - 1);
-    vec3 a = imageLoad(src, ivec2(i0 % W, i0 / W)).rgb;
-    vec3 b = imageLoad(src, ivec2(i1 % W, i1 / W)).rgb;
-    return mix(a, b, t);
+// Sample the signal at integer position i0 plus fraction t. Positions are kept as ints: a
+// float32 s = y·W + x has only 0.25-sample resolution past 2^21 (bottom of a 1080p frame), so
+// the sub-sample delay would step instead of glide. Before the first sample there is no
+// signal yet: black (not a smear of pixel 0).
+vec3 at_int(int i, int W, int N) {
+    if (i < 0 || i >= N) return vec3(0.0);
+    return imageLoad(src, ivec2(i % W, i / W)).rgb;
+}
+vec3 at_signal(int s, float d, int W, int N) {
+    // out(s) = in(s − d):  s − d = (s − floor(d)) − fract(d) = i0 + t  with t = 1 − fract(d)
+    float fl = floor(d);
+    float fr = d - fl;
+    int i0 = s - int(fl) - 1;
+    float t = 1.0 - fr;
+    return mix(at_int(i0, W, N), at_int(i0 + 1, W, N), t);
 }
 
 void main() {
@@ -39,10 +45,10 @@ void main() {
     float tear = step(1.0 - g.sync.w, r) * (hash21(vec2(band * 1.7, tick + 13.0)) * 2.0 - 1.0);
     float wobble = 0.08 * sin(2.0 * PI * (yn * 2.0 + t * 0.7));
     float d = g.sync.x * float(W) * (tear + wobble);          // delay in samples
-    float s = float(px.y * W + px.x);
+    int s = px.y * W + px.x;
     vec3 c;
-    c.r = at_signal(s - d * 1.04, W, N).r;
-    c.g = at_signal(s - d, W, N).g;
-    c.b = at_signal(s - d * 0.96, W, N).b;
+    c.r = at_signal(s, d * 1.04, W, N).r;
+    c.g = at_signal(s, d, W, N).g;
+    c.b = at_signal(s, d * 0.96, W, N).b;
     imageStore(dst, px, vec4(c, 1.0));
 }

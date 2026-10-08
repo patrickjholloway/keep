@@ -9,9 +9,15 @@
 //     offset(λ) = k(λ) · depth · dir(p)
 // dir(p) is either RADIAL (distance from the frame centre, like lateral chromatic aberration
 // of a lens: no shift at the centre, most at the edges) or a fixed DIRECTION (a prism).
-// Instead of three R/G/B taps we integrate 7 wavelengths from 400–700 nm and weight each by a
+// Instead of three R/G/B taps we integrate wavelengths from 400–700 nm and weight each by a
 // Gaussian approximation of the R, G, B colour-matching responses, normalized per channel, so
-// a white point stays white and edges spread into smooth rainbows instead of 3 ghost copies.
+// a white point stays white. For the spread to be a continuous rainbow rather than separate
+// ghost copies, neighbouring taps must land ≤ ~1.5 px apart. So the taps are spaced evenly in
+// k (= evenly in displacement, not in λ: k changes 4× faster per nm at 400 than at 700), their
+// count n follows the local spread |k range|·depth·|dir| (7 .. 64), each tap's λ is the
+// inverse of k(λ), and its weight carries the Jacobian |dλ/dk| = λ³/(2·kn) so the sum is still
+// an integral over wavelength. Each tap is jittered within its stratum by a per-pixel hash,
+// which turns any remaining gap (huge depths that hit the 64 cap) into fine grain, not copies.
 #include "glitch_common.glsl"
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -36,10 +42,16 @@ void main() {
     vec3 acc = vec3(0.0);
     vec3 wsum = vec3(0.0);
     const float kn = 1.0 / (1.0 / (400.0 * 400.0) - 1.0 / (700.0 * 700.0));
-    for (int i = 0; i < 7; i++) {
-        float lambda = 400.0 + 50.0 * float(i);
-        float k = (1.0 / (lambda * lambda) - 1.0 / (550.0 * 550.0)) * kn;
-        vec3 w = response(lambda);
+    const float inv550 = 1.0 / (550.0 * 550.0);
+    const float k_hi = (1.0 / (400.0 * 400.0) - inv550) * kn;   // ≈ +0.70
+    const float k_lo = (1.0 / (700.0 * 700.0) - inv550) * kn;   // ≈ −0.30 (k_hi − k_lo = 1)
+    float spread = abs(g.disp.x * scale) * length(dir);          // px between k_lo and k_hi
+    int n = clamp(int(ceil(spread / 1.5)), 7, 64);
+    float jitter = hash21(p + 0.37);
+    for (int i = 0; i < n; i++) {
+        float k = mix(k_lo, k_hi, (float(i) + jitter) / float(n));
+        float lambda = inversesqrt(k / kn + inv550);
+        vec3 w = response(lambda) * (lambda * lambda * lambda);    // ∝ response · |dλ/dk|
         acc += w * bilinear(p + dir * (k * g.disp.x * scale), size);
         wsum += w;
     }

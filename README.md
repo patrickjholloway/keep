@@ -138,38 +138,43 @@ warp → spectral → crush. Each shader opens with a longer explanation of its 
 3. **Smear** (`glitch_smear.comp`) — a one-pole IIR low-pass along each scanline,
    `y[n] = (1 − a)·x[n] + a·y[n−1]`. Impulse response `(1 − a)·aⁿ`: unit DC gain, trail time
    constant `−1/ln a` pixels (a = 0.95 → 20 px, 0.99 → 100 px). Being recursive it is
-   inherently serial, so it is one compute thread per row. The trail is boosted by `1/√(1−a)`
-   and combined with `max()`, so beads stay crisp and grow comet tails.
+   inherently serial, so it is one compute thread per row. Only the history above the input is
+   boosted (by `1/√(1−a)`), so flat areas pass unchanged, beads stay crisp and grow comet tails.
 4. **Dispersion** (`glitch_disp.comp`) — a prism: refractive index follows Cauchy's
    `n(λ) ≈ A + B/λ²`, so the displacement is `k(λ) = (1/λ² − 1/550²)/(1/400² − 1/700²)` times
    `depth` along either the radial direction (lateral chromatic aberration: nothing at the
-   centre, most at the edges) or a fixed angle. Seven wavelengths 400–700 nm are sampled and
-   weighted by Gaussian R/G/B responses (normalized per channel, so white stays white): edges
+   centre, most at the edges) or a fixed angle. Wavelengths 400–700 nm are sampled evenly in
+   displacement (7 to 64 taps, enough to keep neighbouring taps ≤ 1.5 px apart), jittered per
+   pixel, and weighted by Gaussian R/G/B responses (normalized per channel, so white stays white): edges
    spread into continuous rainbows rather than three ghost copies.
 5. **Conformal warp** (`glitch_warp.comp`) — each pixel is a complex `z` (centred, aspect
    correct, ±1 over the height) and the image is pushed through the Möbius map
    `f(z) = (az + b)/(cz + d)`. Möbius maps are conformal (angles preserved: beads stay round)
    and send circles to circles. The shader maps *backward*: each output pixel `w` samples the
    input at `f⁻¹(w) = (dw − b)/(−cw + a)`, so there are no holes. `warp.amount` blends
-   `a, b, c, d` with the identity. The exemplar uses an *elliptic* map with fixed points `±p`
+   `a, b, c, d` with the identity (a plain lerp when that stays invertible, else the matrix
+   power `M^amount`, so e.g. a rotation preset turns by `amount·θ` instead of collapsing). The exemplar uses an *elliptic* map with fixed points `±p`
    (a rotation conjugated by `(z − p)/(z + p)`): `a = d = 1`, `b = −i p tan(θ/2)`,
    `c = −i tan(θ/2)/p` — the picture swirls around two still points; since the centre is
    magnified by `1 + tan²(θ/2)`, the same envelope is also patched into `warp.zoom`.
-6. **Spectral gate** (`glitch_spectral.comp`) — the frame is resampled to a 1024×512 grid and
+6. **Spectral gate** (`glitch_spectral.comp`) — the frame is box-filtered down to a 1024×512 grid,
+   mirrored into a 2048×1024 grid (even extension: no wrap seam at the frame edges), and
    2D-FFT'd with a radix-2 **Stockham** FFT (one dispatch per butterfly stage, ping-ponging two
-   buffers, output in natural order: no bit reversal; 10 + 9 stages each way). Per bin, the
-   radial frequency `|f|` (cycles/pixel) selects a soft band `[lo, hi]`; the band is scaled by
+   buffers, output in natural order: no bit reversal; 11 + 10 stages each way). Per bin, the
+   radial frequency `|f|` (cycles per grid pixel, aspect-corrected so the band is a circle in
+   the image) selects a soft band `[lo, hi]`; the band is scaled by
    `1 − atten` and its phase bent by `θ(f) = phase·π·sin(2π f·D)`. By the Jacobi–Anger
    expansion `e^{iA sin x} = Σ Jₙ(A) e^{inx}`, that phase makes copies of the band's content
    shifted by `n·D` with Bessel weights — multipath ghost echoes of fine detail only, while the
    broad form is untouched; `seed` picks the echo direction. Gain is even and phase odd in `f`,
    so the inverse stays real. Only the *change* is upsampled and added back
    (`out = orig + mix·(up(filtered) − up(down(orig)))`), so the downsampling never blurs the
-   picture. The FFT treats the frame as periodic, so echoes near an edge wrap to the opposite
-   edge. `src/glitch.rs` has a CPU twin of the algorithm, tested against a naive DFT.
+   picture. Because the FFT sees the mirrored frame, echoes reflect at the frame edges
+   instead of wrapping to the opposite edge. `src/glitch.rs` has a CPU twin of the algorithm,
+   tested against a naive DFT.
 7. **Bitcrush / sample-and-hold** (`glitch_crush.comp`) — decimation holds one sample per
    `hold × hold` block (a lower sample rate, in 2D); quantization snaps brightness to
-   `2^(8 − 7·depth)` levels (a lower bit depth) in the tone-compressed domain `c/(1 + c)`, so
+   `2^(8 − 7·depth)` mid-rise levels (a lower bit depth) in the tone-compressed domain `c/(1 + c)`, so
    unbounded HDR values posterize evenly.
 
 The `mean_luma` source comes from `glitch_stats.comp`: one invocation averages a 64×36 grid of
@@ -218,8 +223,6 @@ by `src/glitch.rs`); `tonemap.frag` does bloom, hue-preserving tonemapping, grad
   briefly go almost empty; the exemplar has a couple of near-blank moments (~12 s, ~30 s) by design
   of the drop.
 - The climax shapes are still fairly rounded blobs rather than crisply faceted forms.
-- The spectral gate's FFT assumes a periodic frame, so ghost echoes near one edge reappear at
-  the opposite edge (visible as a ragged band at the bottom during the drop).
 - The glitch chain is not audio-reactive in `keep run` (live mode has no audio input yet), but
   LFOs, `mean_luma` and script sources work there.
 - MoltenVK only has been tested (Apple GPU); other Vulkan drivers should work but are untried.

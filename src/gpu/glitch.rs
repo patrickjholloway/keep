@@ -4,7 +4,8 @@
 //!
 //! Resources:
 //!   * `ubo`     GlitchParams (host-visible, rewritten every frame)
-//!   * `fft_a/b` spectral-gate work buffers, 1024×512 cells × (re.rgb, im.rgb) = 16 MiB each
+//!   * `fft_a/b` spectral-gate work buffers, 2048×1024 cells × (re.rgb, im.rgb) = 64 MiB each
+//!     (the 1024×512 working image plus its mirror extension, so the FFT sees no edge seam)
 //!   * `stats`   16 bytes written by glitch_stats.comp, read by the CPU after the fence
 //!   * two descriptor sets that differ only in which image is `src` and which is `dst`:
 //!     sets[0] = HDR -> scratch, sets[1] = scratch -> HDR. Each active module uses the set for
@@ -17,9 +18,13 @@ use ash::vk;
 use super::{buffers::Buffer, passes::shader_module, shaders, GpuContext};
 use crate::glitch::GlitchParams;
 
-/// Spectral-gate working grid (must match FN / FM in glitch_spectral.comp).
-pub const FFT_N: u32 = 1024;
-pub const FFT_M: u32 = 512;
+/// Spectral-gate FFT grid (must match FN / FM in glitch_spectral.comp): twice the working
+/// image in each axis, which LOAD fills with the image's mirror extension.
+pub const FFT_N: u32 = 2048;
+pub const FFT_M: u32 = 1024;
+/// Working image the frame is resampled to (IW / IH in glitch_spectral.comp).
+pub const FFT_IW: u32 = FFT_N / 2;
+pub const FFT_IH: u32 = FFT_M / 2;
 const CPLX_BYTES: u64 = 32;
 
 pub struct GlitchPass {
@@ -101,6 +106,12 @@ impl GlitchPass {
                 bound: (vk::ImageView::null(), vk::ImageView::null()),
             })
         }
+    }
+
+    /// Forget which views the sets point at. Call after the images are recreated (resize):
+    /// a new view can reuse a destroyed one's handle value, which would defeat the cache.
+    pub fn invalidate_images(&mut self) {
+        self.bound = (vk::ImageView::null(), vk::ImageView::null());
     }
 
     /// Point the two sets at (hdr, scratch). Only call when the GPU is not using the sets

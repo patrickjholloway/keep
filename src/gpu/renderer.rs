@@ -239,6 +239,14 @@ impl Renderer {
     }
 
     /// Render one frame into the offscreen target and block until its RGBA pixels are readable.
+    /// Drop the cached image-descriptor bindings (glitch sets, tonemap input). Must be called
+    /// after the render target's images are recreated: handle values can be reused, so a
+    /// handle comparison alone could keep a set pointing at a destroyed view.
+    pub fn invalidate_image_bindings(&mut self) {
+        self.glitch_pass.invalidate_images();
+        self.tonemap_input = vk::ImageView::null();
+    }
+
     pub fn render_offscreen<'a>(&mut self, target: &'a Offscreen, params: &SceneParams) -> anyhow::Result<&'a [u8]> {
         let count = self.begin_frame(params)?;
         self.record_frame((target.hdr.image, target.hdr.view), (target.scratch.image, target.scratch.view), target.color.image, target.color.view, target.color.extent, count);

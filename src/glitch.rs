@@ -219,15 +219,59 @@ pub fn resolve_values(desc: &GlitchDesc, t: f32, f: &Features, mean_luma: f32) -
 }
 
 /// Blend a Möbius coefficient set with the identity (a=d=1, b=c=0) by `amount` in 0..1.
-/// The blend of two Möbius coefficient sets is again a Möbius map as long as ad − bc ≠ 0.
-#[cfg_attr(not(test), allow(dead_code))]
+///
+/// The plain coefficient lerp I + (M − I)·t is NOT always a Möbius map: its determinant
+/// ad − bc is a quadratic in t and can pass through 0 (a = −1, b = c = 0 at t = ½ gives
+/// a = 0: every pixel would sample one point). It is what the exemplar's dipole maps were
+/// tuned with, and for them (a = d = 1) the determinant 1 − t²·bc never nears 0, so it is kept
+/// whenever the whole lerp path stays well away from singular (relative |det| > 0.2 along it;
+/// a unitary map scores 0.5). Otherwise the blend uses the
+/// matrix power M^t (a geodesic from I to M), which is invertible for every t: a rotation
+/// preset then rotates by t·θ instead of shrinking through 0. The choice depends only on M,
+/// so ramping `amount` never switches branch mid-ramp. A singular M gives the identity.
 pub fn blend_with_identity(m: [C; 4], amount: f32) -> [C; 4] {
     let id = [C(1.0, 0.0), C(0.0, 0.0), C(0.0, 0.0), C(1.0, 0.0)];
-    let mut out = id;
-    for i in 0..4 {
-        out[i] = C(id[i].0 + (m[i].0 - id[i].0) * amount, id[i].1 + (m[i].1 - id[i].1) * amount);
+    let lerp = |t: f32| {
+        let mut out = id;
+        for i in 0..4 {
+            out[i] = C(id[i].0 + (m[i].0 - id[i].0) * t, id[i].1 + (m[i].1 - id[i].1) * t);
+        }
+        out
+    };
+    let scale = |q: [C; 4]| q.iter().map(|c| c.0 * c.0 + c.1 * c.1).sum::<f32>().max(1e-12);
+    // relative singularity: |det| / (|a|²+|b|²+|c|²+|d|²) is ½ for a unitary map, 0 if singular
+    let rel = |q: [C; 4]| det(q).abs() / scale(q);
+    if !(rel(m) > 1e-6) {
+        return id;
     }
-    out
+    let lerp_safe = (0..=64).all(|i| rel(lerp(i as f32 / 64.0)) > 0.2);
+    if lerp_safe { lerp(amount) } else { mat_pow(m, amount) }
+}
+
+fn det(m: [C; 4]) -> C { m[0].mul(m[3]).sub(m[1].mul(m[2])) }
+
+/// M^t for an invertible complex 2×2 matrix [[a, b], [c, d]] (principal branch).
+/// Distinct eigenvalues λ1 ≠ λ2 (Sylvester):  M^t = (λ1^t (M − λ2 I) − λ2^t (M − λ1 I)) / (λ1 − λ2)
+/// Repeated eigenvalue λ (M = λ(I + N), N nilpotent):  M^t = λ^t (I + t N)
+fn mat_pow(m: [C; 4], t: f32) -> [C; 4] {
+    let [a, b, c, d] = m;
+    let half_tr = C(0.5 * (a.0 + d.0), 0.5 * (a.1 + d.1));
+    let disc = half_tr.mul(half_tr).sub(det(m)).sqrt();
+    let (l1, l2) = (half_tr.add(disc), half_tr.sub(disc));
+    let one = C(1.0, 0.0);
+    if disc.abs() < 1e-4 * half_tr.abs().max(1e-6) {
+        let lt = half_tr.pow(t);
+        let ti = C(t, 0.0);
+        let n = [a.div(half_tr).sub(one), b.div(half_tr), c.div(half_tr), d.div(half_tr).sub(one)];
+        return [lt.mul(one.add(ti.mul(n[0]))), lt.mul(ti.mul(n[1])), lt.mul(ti.mul(n[2])), lt.mul(one.add(ti.mul(n[3])))];
+    }
+    let (p1, p2) = (l1.pow(t), l2.pow(t));
+    let den = l1.sub(l2);
+    let f = |m_ii: C, lam_other: C, lam: C, is_diag: bool| -> C {
+        let (x, y) = if is_diag { (m_ii.sub(lam_other), m_ii.sub(lam)) } else { (m_ii, m_ii) };
+        p1.mul(x).sub(p2.mul(y)).div(den)
+    };
+    [f(a, l2, l1, true), f(b, l2, l1, false), f(c, l2, l1, false), f(d, l2, l1, true)]
 }
 
 pub fn resolve(desc: &GlitchDesc, t: f32, f: &Features, mean_luma: f32, frame: u32) -> GlitchParams {
@@ -273,6 +317,9 @@ impl C {
     pub fn neg(self) -> C { C(-self.0, -self.1) }
     pub fn abs(self) -> f32 { self.0.hypot(self.1) }
     pub fn expi(theta: f32) -> C { C(theta.cos(), theta.sin()) }
+    pub fn sqrt(self) -> C { let r = self.abs().sqrt(); C::expi(0.5 * self.1.atan2(self.0)).mul(C(r, 0.0)) }
+    /// Principal power z^t = e^{t·ln z} (z ≠ 0).
+    pub fn pow(self, t: f32) -> C { C::expi(t * self.1.atan2(self.0)).mul(C(self.abs().powf(t), 0.0)) }
 }
 
 /// Forward Möbius map f(z) = (a z + b) / (c z + d).
@@ -358,6 +405,35 @@ pub fn gate_gain(f: f32, lo: f32, hi: f32, soft: f32, atten: f32, outside: f32) 
     band * (1.0 - atten) + (1.0 - band) * outside
 }
 
+/// Smear output for one scanline (glitch_smear.comp): only the boosted history ABOVE the input
+/// is added, so flat input maps to itself.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn smear_run(x: &[f32], a: f32, depth: f32) -> Vec<f32> {
+    let boost = (1.0 / (1.0 - a).sqrt()).min(8.0);
+    let mut acc = 0.0;
+    x.iter().map(|&v| {
+        let o = v + depth * (boost * a * (acc - v)).max(0.0);
+        acc = (1.0 - a) * v + a * acc;
+        o
+    }).collect()
+}
+
+/// Bitcrush quantizer (glitch_crush.comp): mid-rise L levels in the tone-compressed domain.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn crush_quantize(c: f32, levels: f32) -> f32 {
+    let v = c / (1.0 + c);
+    let v = ((v * levels).floor().min(levels - 1.0) + 0.5) / levels;
+    v / (1.0 - v)
+}
+
+/// Mirror (even) extension of a w×h image into a 2w×2h grid, as LOAD in glitch_spectral.comp
+/// does: the periodic extension has no seam, so the FFT does not see a torus edge.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn mirror_extend(img: &[f32], w: usize, h: usize) -> Vec<C> {
+    let m = |x: usize, n: usize| if x < n { x } else { 2 * n - 1 - x };
+    (0..4 * w * h).map(|i| C(img[m(i / (2 * w), h) * w + m(i % (2 * w), w)], 0.0)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +491,23 @@ mod tests {
         // identity blend: amount 0 is exactly the identity map
         let id = blend_with_identity(m, 0.0);
         assert_eq!(mobius(id, C(0.3, 0.7)), C(0.3, 0.7));
+        // a = −1 (rotation by π): the plain lerp would hit a = 0 (singular) at ½; the blend must
+        // stay invertible and rotate by π/2 there instead
+        let half = blend_with_identity([C(-1.0, 0.0), C(0.0, 0.0), C(0.0, 0.0), C(1.0, 0.0)], 0.5);
+        assert!(det(half).abs() > 0.5, "{half:?}");
+        let w = mobius(half, C(1.0, 0.0));
+        assert!(close(w.abs(), 1.0, 1e-4) && close(w.0, 0.0, 1e-4), "{w:?}");
+        for i in 0..=20 {
+            let q = blend_with_identity([C::expi(3.0), C(0.2, 0.0), C(0.0, 0.1), C(1.0, 0.0)], i as f32 / 20.0);
+            assert!(det(q).abs() > 0.3, "{i} {q:?}");
+        }
+        // endpoints exact on the power branch too
+        let rot_pi = [C(-1.0, 0.0), C(0.0, 0.0), C(0.0, 0.0), C(1.0, 0.0)];
+        let full = blend_with_identity(rot_pi, 1.0);
+        assert!(mobius(full, C(0.3, 0.4)).sub(C(-0.3, -0.4)).abs() < 1e-4);
+        // the exemplar's dipole map (a = d = 1) keeps the plain lerp (unchanged look)
+        let dip = [C(1.0, 0.0), C(0.0, -0.4), C(0.0, -0.9), C(1.0, 0.0)];
+        assert_eq!(blend_with_identity(dip, 0.5), [C(1.0, 0.0), C(0.0, -0.2), C(0.0, -0.45), C(1.0, 0.0)]);
         // a pure rotation (a = e^{iθ}, d = 1) preserves |z|: conformal + isometric
         let rot = [C::expi(0.7), C(0.0, 0.0), C(0.0, 0.0), C(1.0, 0.0)];
         assert!(close(mobius(rot, C(0.6, 0.8)).abs(), 1.0, 1e-6));
@@ -490,5 +583,64 @@ mod tests {
         assert!(close(gate_gain(0.4, 0.05, 0.2, 0.01, 1.0, 1.0), 1.0, 1e-6), "outside passes");
         assert!(close(gate_gain(0.1, 0.05, 0.2, 0.01, 0.5, 1.0), 0.5, 1e-6));
         assert!(close(bin_freq(48, 0, 64, 32), 16.0 / 64.0, 1e-6), "negative frequency wraps");
+    }
+
+    #[test]
+    fn smear_flat_input_is_identity_and_trail_is_boosted() {
+        for &a in &[0.5, 0.95, 0.99] {
+            let y = smear_run(&vec![0.7; 500], a, 1.0);
+            assert!(y.iter().all(|&o| close(o, 0.7, 1e-4)), "flat run brightened at a={a}");
+        }
+        let mut x = vec![0.1; 200];
+        x[50] = 5.0;
+        let y = smear_run(&x, 0.95, 1.0);
+        assert!(close(y[50], 5.0, 1e-5), "bead stays crisp");
+        assert!(y[51] > 0.1 + 0.5, "trail behind the bead");
+        assert!(close(y[10], 0.1, 1e-3), "background before the bead untouched");
+    }
+
+    #[test]
+    fn crush_top_band_stays_proportionate() {
+        // L = 2: top band (v >= 0.5, c >= 1) -> v = 0.75 -> c = 3, not 49
+        assert!(close(crush_quantize(3.0, 2.0), 3.0, 1e-4));
+        assert!(close(crush_quantize(1000.0, 2.0), 3.0, 1e-3));
+        assert!(close(crush_quantize(0.2, 2.0), 1.0 / 3.0, 1e-4));
+        // fine quantization is close to the identity
+        for &c in &[0.05f32, 0.5, 2.0] {
+            assert!((crush_quantize(c, 256.0) - c).abs() < 0.02 * (1.0 + c) * (1.0 + c));
+        }
+    }
+
+    #[test]
+    fn mirror_extension_removes_the_edge_seam() {
+        // Vertical ramp (dark top, bright bottom): on a torus the bottom row abuts the top row,
+        // a step of ~1. A band-stop then rings at the top/bottom rows. Mirrored, the periodic
+        // extension is continuous and the edge rows barely move.
+        let (w, h) = (32usize, 32usize);
+        let img: Vec<f32> = (0..w * h).map(|i| (i / w) as f32 / (h - 1) as f32).collect();
+        let band_stop = |grid: &mut Vec<C>, gw: usize, gh: usize| {
+            fft2d(grid, gw, gh, -1.0);
+            for ky in 0..gh {
+                for kx in 0..gw {
+                    let g = gate_gain(bin_freq(kx, ky, gw, gh), 0.1, 0.4, 0.01, 1.0, 1.0);
+                    let v = grid[ky * gw + kx];
+                    grid[ky * gw + kx] = C(v.0 * g, v.1 * g);
+                }
+            }
+            fft2d(grid, gw, gh, 1.0);
+            let n = (gw * gh) as f32;
+            for v in grid.iter_mut() { *v = C(v.0 / n, v.1 / n); }
+        };
+        let edge_err = |out: &dyn Fn(usize, usize) -> f32| {
+            (0..w).map(|x| (out(x, 0) - img[x]).abs().max((out(x, h - 1) - img[(h - 1) * w + x]).abs())).fold(0.0f32, f32::max)
+        };
+        let mut torus: Vec<C> = img.iter().map(|&v| C(v, 0.0)).collect();
+        band_stop(&mut torus, w, h);
+        let mut mir = mirror_extend(&img, w, h);
+        band_stop(&mut mir, 2 * w, 2 * h);
+        let e_torus = edge_err(&|x, y| torus[y * w + x].0);
+        let e_mir = edge_err(&|x, y| mir[y * 2 * w + x].0);
+        assert!(e_torus > 0.1, "torus seam should ring ({e_torus})");
+        assert!(e_mir < 0.25 * e_torus, "mirror {e_mir} vs torus {e_torus}");
     }
 }

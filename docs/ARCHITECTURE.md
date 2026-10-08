@@ -48,7 +48,7 @@ sees the 4D scene. 11 × vec4, std140, size asserted. Set by the caller on
 Patch-bay resolution (`glitch::resolve_values`): `base + Σ(gain·src + offset)`, clamped per
 parameter (`glitch::PARAMS` lists names, defaults and ranges). Glitch descriptor set (its own
 layout, compute only): 0 `Glitch` UBO · 1 `src` image · 2 `dst` image · 3/4 FFT buffers A/B
-(1024×512 × 32 B) · 5 `Stats` (host-visible, mean luminance). Two sets swap 1↔2 for ping-pong
+(2048×1024 × 32 B: the 1024×512 working image + its mirror extension) · 5 `Stats` (host-visible, mean luminance). Two sets swap 1↔2 for ping-pong
 between the HDR image and the target's `scratch` image; the tonemap reads whichever holds the
 result.
 

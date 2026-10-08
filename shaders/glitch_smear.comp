@@ -6,8 +6,12 @@
 // time constant τ = −1/ln(a) pixels (a = 0.95 → 20 px, a = 0.99 → 100 px). DC gain is 1.
 // An IIR filter is inherently sequential (each output needs the previous one), so this is a
 // compute pass with ONE THREAD PER ROW walking the line left->right (or right->left).
-// The tail is scaled up by 1/√(1 − a) (the filter spreads a bead's energy thin) and combined
-// with max(): beads stay crisp, only the trail is added.
+// The tail is scaled up by 1/√(1 − a) (the filter spreads a bead's energy thin). Because the
+// filter has unit DC gain, boosting acc itself would also lift every flat region by `boost`
+// (acc → v there), so only the HISTORY above the input is boosted:
+//     o = v + depth · max(boost · a · (y[n−1] − x[n]), 0)
+// a·y[n−1] is what the past contributes; on a flat run y[n−1] = x[n], so o = v exactly, and
+// the trail behind a bead (history brighter than the pixel) gets the boosted excess.
 #include "glitch_common.glsl"
 layout(local_size_x = 64) in;
 
@@ -22,8 +26,8 @@ void main() {
     for (int i = 0; i < size.x; i++) {
         int x = rev ? size.x - 1 - i : i;
         vec3 v = imageLoad(src, ivec2(x, y)).rgb;
+        vec3 o = v + g.smear.x * max(boost * a * (acc - v), vec3(0.0));
         acc = (1.0 - a) * v + a * acc;
-        vec3 o = mix(v, max(v, acc * boost), g.smear.x);
         imageStore(dst, ivec2(x, y), vec4(o, 1.0));
     }
 }
