@@ -1,0 +1,86 @@
+#version 450
+// field.comp — one invocation per particle.
+//   p4 = (x, y, z, w_slice);  q = A^-1 (p4 - t);  d = F(q)
+// Particles with |d| < surface_width become visible droplets.
+#include "common.glsl"
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 1) readonly buffer Seeds { vec4 seeds[]; };   // xyz = rest position, w = random
+layout(std430, set = 0, binding = 2) buffer Out { Droplet droplets[]; };
+
+// --- 4D signed distance primitives (in primitive-local coordinates) ---
+float sd_hypersphere(vec4 q, float r) { return length(q) - r; }
+float sd_tesseract(vec4 q, vec4 b) {
+    vec4 d = abs(q) - b;
+    return length(max(d, vec4(0.0))) + min(max(max(d.x, d.y), max(d.z, d.w)), 0.0);
+}
+float sd_duocylinder(vec4 q, float r1, float r2) {
+    vec2 d = vec2(length(q.xy) - r1, length(q.zw) - r2);
+    return length(max(d, vec2(0.0))) + min(max(d.x, d.y), 0.0);
+}
+float sd_clifford(vec4 q, float r1, float r2, float th) {
+    vec2 d = vec2(length(q.xy) - r1, length(q.zw) - r2);
+    return length(d) - th;
+}
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / max(k, 1e-5), 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+float prim_eval(uint i, vec4 q) {
+    Primitive p = scene.prims[i];
+    vec4 l = p.inv_a * (q - p.t);
+    uint k = p.kind_op.x;
+    if (k == PRIM_HYPERSPHERE) return sd_hypersphere(l, p.params.x);
+    if (k == PRIM_TESSERACT)   return sd_tesseract(l, p.params);
+    if (k == PRIM_DUOCYLINDER) return sd_duocylinder(l, p.params.x, p.params.y);
+    return sd_clifford(l, p.params.x, p.params.y, p.params.z);
+}
+
+float field(vec4 p4) {
+    vec4 q = scene.inv_a * (p4 - scene.t);
+    float d = 1e9;
+    for (uint i = 0u; i < scene.counts.y; i++) {
+        float di = prim_eval(i, q);
+        uint op = scene.prims[i].kind_op.y;
+        if (i == 0u || op == OP_UNION) d = min(d, di);
+        else if (op == OP_SMOOTH_UNION) d = smin(d, di, scene.prims[i].params.w);
+        else if (op == OP_INTERSECT) d = max(d, di);
+        else d = max(d, -di);
+    }
+    return d;
+}
+
+// Approximate blackbody color (Tanner Helland fit), linear-ish RGB in [0,1].
+vec3 blackbody(float kelvin) {
+    float t = kelvin / 100.0;
+    float r = t <= 66.0 ? 1.0 : clamp(1.292936 * pow(t - 60.0, -0.1332047592), 0.0, 1.0);
+    float g = t <= 66.0 ? clamp(0.3900815788 * log(t) - 0.6318414438, 0.0, 1.0)
+                        : clamp(1.1298908609 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
+    float b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : clamp(0.5432067891 * log(t - 10.0) - 1.1962540891, 0.0, 1.0));
+    return vec3(r, g, b);
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= scene.counts.x) return;
+    vec4 s = seeds[id];
+    vec4 p4 = vec4(s.xyz, scene.slice.x);
+    float d = field(p4);
+    float eps = scene.slice.y;
+
+    // Central-difference gradient in xyz (the slice is 3D, so the visible normal is 3D).
+    float h = 1e-3;
+    vec3 g = vec3(field(p4 + vec4(h, 0, 0, 0)) - field(p4 - vec4(h, 0, 0, 0)),
+                  field(p4 + vec4(0, h, 0, 0)) - field(p4 - vec4(0, h, 0, 0)),
+                  field(p4 + vec4(0, 0, h, 0)) - field(p4 - vec4(0, 0, h, 0)));
+    vec3 n = normalize(g + vec3(1e-9));
+
+    float vis = 1.0 - smoothstep(0.0, eps, abs(d));        // 1 on the surface, 0 beyond eps
+    float temp = mix(scene.material.x, scene.material.y, clamp(0.5 + 0.5 * d / eps, 0.0, 1.0));
+    Droplet o;
+    o.pos_size = vec4(s.xyz, vis > 0.0 ? scene.slice.z * (0.6 + 0.4 * vis) : 0.0);
+    o.normal_d = vec4(n, d);
+    o.emission = vec4(blackbody(temp) * scene.material.w, vis);
+    droplets[id] = o;
+}

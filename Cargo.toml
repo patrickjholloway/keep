@@ -4,12 +4,26 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Vulkan: `loaded` = dlopen MoltenVK at runtime via ash::Entry::load_from($KEEP_VULKAN_LIB).
 ash = { version = "0.38", features = ["loaded"] }
 ash-window = "0.13"
 winit = "0.30"
 raw-window-handle = "0.6"
+# Math on the hot path; bytemuck lets SceneParams be uploaded as raw bytes.
 glam = { version = "0.29", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
+# Lua topcoat (scene.lua) + hot reload watcher.
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 notify = "6"
 anyhow = "1"
+# Audio: synthesis -> WAV (hound), analysis via FFT (realfft).
+hound = "3"
+realfft = "3"
+rand = { version = "0.8", features = ["small_rng"] }
+
+[build-dependencies]
+# GLSL -> SPIR-V at build time, pure Rust (no shaderc / glslang needed).
+naga = { version = "25", features = ["glsl-in", "spv-out"] }
+
+[profile.dev]
+opt-level = 1
