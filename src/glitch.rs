@@ -48,7 +48,7 @@ pub struct GlitchParams {
     /// x = mix (0 = bypass), y = band lo, z = band hi (radial frequency, cycles/pixel of the
     /// working grid, 0..0.5·√2), w = attenuation in the band (0..1, can exceed 1 to invert).
     pub spec: [f32; 4],
-    /// x = phase scramble in the band (0..1 → up to ±π), y = seed, z = band softness, w = gain
+    /// x = phase (ghost-echo strength in the band, 0..1 → up to ±π), y = seed (echo direction), z = band softness, w = gain
     /// outside the band (1 = untouched).
     pub spec2: [f32; 4],
     /// x = depth (0 = off .. 1 = 2 brightness levels), y = hold (sample-and-hold block, pixels),

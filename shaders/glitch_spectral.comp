@@ -5,9 +5,9 @@
 //     X[kx,ky] = Σ_x Σ_y x[x,y] · e^{−2πi (kx·x/N + ky·y/M)}
 // gives the amplitude and phase of each one; |k| (radial frequency, cycles/pixel) says how
 // FINE the wave is: low |k| = broad glow and overall shape, high |k| = edges, beads, grain.
-// The gate multiplies a ring-shaped band lo ≤ |k| ≤ hi by (1 − atten), optionally rotates the
-// phases inside the band by random angles (structure at that scale smears into ripples and
-// ghost echoes while its energy is kept), then inverse-transforms.
+// The gate multiplies a ring-shaped band lo ≤ |k| ≤ hi by (1 − atten), optionally bends the
+// phases inside the band (structure at that scale splits into ghost echoes while its energy is
+// kept — see FILTER below), then inverse-transforms.
 //
 // Pipeline (this one shader, selected by pc.p.x = mode; the CPU records the sequence):
 //   0 LOAD       resample the frame onto the 1024×512 working grid (re = rgb, im = 0)
@@ -23,8 +23,8 @@
 // Each stage reads one buffer and writes the other ("autosort": the output comes out in
 // natural order with no bit-reversal pass). Forward = rows then columns, inverse = the same
 // with the conjugate twiddle and a 1/(N·M) scale at the end. src/glitch.rs has the CPU twin.
-// We only keep the real part after the inverse: random phases break the Hermitian symmetry a
-// real image's spectrum has, and Re(·) is exactly the symmetric (realizable) half of that edit.
+// The gains and phase edits are symmetric (gain even, phase odd in f), so the inverse is real;
+// we keep the real part, the imaginary part is only rounding noise.
 #include "glitch_common.glsl"
 layout(local_size_x = 256) in;
 
@@ -95,7 +95,16 @@ void main() {
         float soft = g.spec2.z;
         float band = smoothstep(g.spec.y - soft, g.spec.y + soft, f) * (1.0 - smoothstep(g.spec.z - soft, g.spec.z + soft, f));
         float gain = band * (1.0 - g.spec.w) + (1.0 - band) * g.spec2.w;
-        float theta = g.spec2.x * band * PI * (2.0 * hash21(vec2(float(kx), float(ky)) + g.spec2.y) - 1.0);
+        // Phase edit = MULTIPATH GHOSTING. A phase that varies sinusoidally with frequency,
+        //     θ(f) = A · sin(2π f·D),     A = phase·π,   D = echo offset (grid pixels)
+        // expands (Jacobi–Anger) into e^{iθ} = Σ_n J_n(A) e^{i 2π n f·D}: copies of the band's
+        // content shifted by n·D with Bessel weights J_n(A) — echoes, like a TV picking up a
+        // reflected signal. Only fine structure inside the band ghosts; the broad form stays.
+        // θ is odd in f, so Hermitian symmetry (= a real-valued image) is preserved exactly.
+        // `seed` picks the echo direction (golden-angle steps, so successive seeds spread out).
+        float ang_d = g.spec2.y * 2.39996;
+        vec2 D = 26.0 * vec2(cos(ang_d), sin(ang_d));
+        float theta = g.spec2.x * band * PI * sin(2.0 * PI * dot(vec2(fx * float(FN), fy * float(FM)) / vec2(FN, FM), D));
         vec2 w = gain * vec2(cos(theta), sin(theta));
         Cplx v = rd(id);
         wr_same(id, Cplx(vec4(v.re.rgb * w.x - v.im.rgb * w.y, 0.0), vec4(v.re.rgb * w.y + v.im.rgb * w.x, 0.0)));
