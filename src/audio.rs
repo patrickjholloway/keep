@@ -291,20 +291,62 @@ fn render(spec: &TrackSpec) -> (Vec<f32>, Vec<f32>) {
 
 pub(crate) const WIN: usize = 2048;
 
-/// Read any 16/24/32-bit int or float WAV and mix it to mono f32.
-fn read_mono(wav: &Path) -> anyhow::Result<(Vec<f32>, f32)> {
-    let mut rd = hound::WavReader::open(wav)?;
-    let s = rd.spec();
-    let ch = s.channels as usize;
-    let interleaved: Vec<f32> = match s.sample_format {
-        hound::SampleFormat::Float => rd.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = 1.0 / (1i64 << (s.bits_per_sample - 1)) as f32;
-            rd.samples::<i32>().map(|x| x.map(|v| v as f32 * scale)).collect::<Result<_, _>>()?
-        }
-    };
-    let mono = interleaved.chunks(ch).map(|c| c.iter().sum::<f32>() / ch as f32).collect();
-    Ok((mono, s.sample_rate as f32))
+/// Supported `--audio` extensions (decoded by symphonia).
+pub const AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "ogg", "oga", "m4a", "mp4", "aac"];
+
+/// Decode an audio file (WAV, FLAC, MP3, OGG/Vorbis, M4A/AAC) to interleaved f32.
+/// Returns (samples, channels, sample_rate).
+pub fn decode(path: &Path) -> anyhow::Result<(Vec<f32>, usize, u32)> {
+    use symphonia::core::{audio::SampleBuffer, codecs::{DecoderOptions, CODEC_TYPE_NULL}, errors::Error,
+        formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
+    use anyhow::Context;
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    anyhow::ensure!(AUDIO_EXTS.contains(&ext.as_str()),
+        "{}: unsupported audio format '.{ext}' (supported: {})", path.display(), AUDIO_EXTS.join(", "));
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(&ext);
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| anyhow::anyhow!("{}: cannot read as .{ext} audio: {e}", path.display()))?;
+    let mut fmt = probed.format;
+    let track = fmt.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .with_context(|| format!("{}: no audio track", path.display()))?;
+    let id = track.id;
+    let mut dec = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| anyhow::anyhow!("{}: unsupported codec: {e}", path.display()))?;
+    let (mut out, mut ch, mut rate) = (Vec::new(), track.codec_params.channels.map(|c| c.count()).unwrap_or(0),
+        track.codec_params.sample_rate.unwrap_or(0));
+    loop {
+        let pkt = match fmt.next_packet() {
+            Ok(p) => p,
+            Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(Error::ResetRequired) => break,
+            Err(e) => return Err(anyhow::anyhow!("{}: {e}", path.display())),
+        };
+        if pkt.track_id() != id { continue; }
+        let buf = match dec.decode(&pkt) {
+            Ok(b) => b,
+            Err(Error::DecodeError(_)) => continue, // skip a corrupt frame
+            Err(e) => return Err(anyhow::anyhow!("{}: {e}", path.display())),
+        };
+        let spec = *buf.spec();
+        ch = spec.channels.count();
+        rate = spec.rate;
+        let mut sb = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
+        sb.copy_interleaved_ref(buf);
+        out.extend_from_slice(sb.samples());
+    }
+    anyhow::ensure!(ch > 0 && rate > 0 && !out.is_empty(), "{}: no decodable audio", path.display());
+    Ok((out, ch, rate))
+}
+
+/// Decode any supported file and mix it to mono f32.
+fn read_mono(path: &Path) -> anyhow::Result<(Vec<f32>, f32)> {
+    let (inter, ch, rate) = decode(path)?;
+    let mono = inter.chunks(ch).map(|c| c.iter().sum::<f32>() / ch as f32).collect();
+    Ok((mono, rate as f32))
 }
 
 /// Divide by the 99th percentile and clamp to [0, 1].
@@ -467,6 +509,34 @@ mod tests {
         }
         let n = beats.len() as f32;
         assert!(on_kick / n > 1.5 * off_kick / n, "kick onsets {on_kick} vs offbeats {off_kick}");
+    }
+
+    #[test]
+    fn decodes_flac_via_ffmpeg() {
+        if !crate::capture::ffmpeg_available() { eprintln!("skip: no ffmpeg"); return; }
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-audio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join(format!("{}-src.wav", std::process::id()));
+        let flac = dir.join(format!("{}-src.flac", std::process::id()));
+        synthesize(&TrackSpec { seconds: 2.0, bpm: 120.0, sample_rate: 44_100, seed: 3 }, &wav).unwrap();
+        let st = std::process::Command::new("ffmpeg").args(["-y", "-loglevel", "error", "-i"]).arg(&wav)
+            .args(["-c:a", "flac"]).arg(&flac).status().unwrap();
+        assert!(st.success());
+        let (s, ch, rate) = decode(&flac).unwrap();
+        let (w, wch, wrate) = decode(&wav).unwrap();
+        assert_eq!((ch, rate), (2, 44_100));
+        assert_eq!((wch, wrate), (2, 44_100));
+        assert_eq!(s.len(), 2 * 88_200);
+        assert_eq!(s.len(), w.len());
+        assert!(s.iter().zip(&w).all(|(a, b)| (a - b).abs() < 1e-4));
+        assert_eq!(analyze(&flac, 30.0, None).unwrap().len(), 60);
+        let _ = (std::fs::remove_file(wav), std::fs::remove_file(flac));
+    }
+
+    #[test]
+    fn rejects_unsupported_format() {
+        let e = decode(Path::new("x.xyz")).unwrap_err().to_string();
+        assert!(e.contains("unsupported audio format"), "{e}");
     }
 
     #[test]

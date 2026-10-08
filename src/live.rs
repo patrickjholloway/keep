@@ -131,20 +131,11 @@ impl Player {
     pub fn toggle_mute(&self) -> bool { !self.muted.fetch_xor(true, Ordering::Relaxed) }
 }
 
-/// Read a WAV as interleaved stereo f32 (mono is duplicated, >2 channels keep the first two).
-fn read_stereo(wav: &Path) -> anyhow::Result<(Vec<f32>, u32)> {
-    let mut rd = hound::WavReader::open(wav).with_context(|| format!("open {}", wav.display()))?;
-    let s = rd.spec();
-    let ch = s.channels as usize;
-    let inter: Vec<f32> = match s.sample_format {
-        hound::SampleFormat::Float => rd.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = 1.0 / (1i64 << (s.bits_per_sample - 1)) as f32;
-            rd.samples::<i32>().map(|x| x.map(|v| v as f32 * scale)).collect::<Result<_, _>>()?
-        }
-    };
+/// Decode any supported file as interleaved stereo f32 (mono is duplicated, >2 channels keep the first two).
+fn read_stereo(path: &Path) -> anyhow::Result<(Vec<f32>, u32)> {
+    let (inter, ch, rate) = audio::decode(path)?;
     let out = inter.chunks(ch).flat_map(|c| [c[0], *c.get(1).unwrap_or(&c[0])]).collect();
-    Ok((out, s.sample_rate))
+    Ok((out, rate))
 }
 
 fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transport>>, muted: Arc<AtomicBool>)
@@ -186,6 +177,8 @@ fn open_output(samples: Arc<Vec<f32>>, src_rate: u32, shared: Arc<Mutex<Transpor
 /// Ensure the WAV exists (synthesizing the default track if not), then analyze it for lookup.
 pub fn prepare(wav: &Path, synth_seconds: f32) -> anyhow::Result<Track> {
     if !wav.exists() {
+        anyhow::ensure!(wav.extension().map_or(false, |e| e.eq_ignore_ascii_case("wav")),
+            "{}: not found (only a missing .wav path is synthesized)", wav.display());
         if let Some(d) = wav.parent() { if !d.as_os_str().is_empty() { std::fs::create_dir_all(d)?; } }
         let spec = audio::TrackSpec { seconds: synth_seconds, ..Default::default() };
         eprintln!("[run] synthesizing {synth_seconds:.0}s track -> {}", wav.display());

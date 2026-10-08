@@ -33,6 +33,8 @@ pub fn render(args: &RenderArgs) -> anyhow::Result<()> {
     // 1. Audio: reuse an existing WAV, otherwise synthesize an original track of the right length.
     let wav = args.audio.clone().unwrap_or_else(|| args.out.with_extension("wav"));
     if !wav.exists() {
+        anyhow::ensure!(wav.extension().map_or(false, |e| e.eq_ignore_ascii_case("wav")),
+            "{}: not found (only a missing .wav path is synthesized)", wav.display());
         if let Some(d) = wav.parent() { if !d.as_os_str().is_empty() { std::fs::create_dir_all(d)?; } }
         let spec = TrackSpec { seconds: args.seconds, ..TrackSpec::default() };
         eprintln!("[render] synthesizing {:.1}s track -> {}", args.seconds, wav.display());

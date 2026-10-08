@@ -1,6 +1,6 @@
 //! keep — 4D implicit-field slice renderer.
 //!
-//!   keep run    scripts/scene.lua [--audio a.wav | --mic] [--frames N]   (N = exit after N frames; smoke test)
+//!   keep run    scripts/scene.lua [--audio a.flac|.wav|.mp3|.ogg|.m4a | --mic] [--frames N]   (N = exit after N frames; smoke test)
 //!   keep render scripts/scene.lua --audio out.wav --seconds N --fps 30 --size 1920x1080 --out out.mp4 [--particles N]
 //!   keep probe                       (list Vulkan devices; smoke test)
 //!
@@ -27,13 +27,13 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") => {
-            let script = PathBuf::from(args.get(1).context("usage: keep run <scene.lua> [--audio a.wav | --mic] [--frames N]")?);
+            let script = PathBuf::from(args.get(1).context("usage: keep run <scene.lua> [--audio a.flac|.wav|.mp3|.ogg|.m4a | --mic] [--frames N]")?);
             let (mut frames, mut wav, mut mic) = (None, None, false);
             let mut it = args[2..].iter();
             while let Some(flag) = it.next() {
                 match flag.as_str() {
                     "--frames" => frames = Some(it.next().context("--frames N")?.parse()?),
-                    "--audio" => wav = Some(PathBuf::from(it.next().context("--audio a.wav")?)),
+                    "--audio" => wav = Some(PathBuf::from(it.next().context("--audio a.flac|.wav|.mp3|.ogg|.m4a")?)),
                     "--mic" => mic = true,
                     f => bail!("unknown flag {f}"),
                 }
@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("render") => offline::render(&parse_render(&args[1..])?),
         Some("probe") => probe(),
-        _ => bail!("usage: keep run <scene.lua> | keep render <scene.lua> --audio a.wav --seconds N --fps 30 --size WxH --out out.mp4 | keep probe"),
+        _ => bail!("usage: keep run <scene.lua> | keep render <scene.lua> --audio a.flac|.wav|.mp3|.ogg|.m4a --seconds N --fps 30 --size WxH --out out.mp4 | keep probe"),
     }
 }
 

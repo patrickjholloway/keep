@@ -18,11 +18,15 @@ mise exec -- cargo test               # 35 tests (GPU tests skip if no Vulkan)
 
 # live window with music, hot-reloads the script on save. Without --audio it plays the
 # exemplar track (synthesized to out/keep-exemplar.wav on first run, 75 s, looped).
-mise exec -- ./target/release/keep run scripts/exemplar.lua [--audio a.wav] [--frames N]
+mise exec -- ./target/release/keep run scripts/exemplar.lua [--audio a.flac] [--frames N]
 # or react to the default microphone instead (realtime FFT, same features)
 mise exec -- ./target/release/keep run scripts/exemplar.lua --mic
 
-# offline render (synthesizes <out>.wav if --audio is missing or absent)
+# --audio accepts WAV, FLAC, MP3, OGG/Vorbis and M4A/AAC (decoded in-process by symphonia;
+# analysis uses a mono mixdown, playback keeps stereo and resamples to the device rate).
+# Only a missing .wav path is synthesized; any other missing or unknown file is an error.
+# offline render (synthesizes <out>.wav if --audio is missing or absent; ffmpeg muxes the
+# original --audio file as AAC)
 mise exec -- ./target/release/keep render scripts/exemplar.lua \
     --seconds 75 --fps 60 --size 1920x1080 --out out/keep-exemplar.mp4 [--audio a.wav] [--particles 750000]
 ```
