@@ -1,6 +1,6 @@
 //! keep — 4D implicit-field slice renderer.
 //!
-//!   keep run    scripts/scene.lua [--frames N]   (N = exit after N frames; smoke test)
+//!   keep run    scripts/scene.lua [--audio a.wav | --mic] [--frames N]   (N = exit after N frames; smoke test)
 //!   keep render scripts/scene.lua --audio out.wav --seconds N --fps 30 --size 1920x1080 --out out.mp4 [--particles N]
 //!   keep probe                       (list Vulkan devices; smoke test)
 //!
@@ -11,6 +11,7 @@ mod camera;
 mod capture;
 mod field;
 mod glitch;
+mod live;
 mod gpu;
 mod math4d;
 mod offline;
@@ -26,13 +27,28 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") => {
-            let script = PathBuf::from(args.get(1).context("usage: keep run <scene.lua> [--frames N]")?);
-            let frames = match args.get(2).map(String::as_str) {
-                Some("--frames") => Some(args.get(3).context("--frames N")?.parse()?),
-                Some(f) => bail!("unknown flag {f}"),
-                None => None,
+            let script = PathBuf::from(args.get(1).context("usage: keep run <scene.lua> [--audio a.wav | --mic] [--frames N]")?);
+            let (mut frames, mut wav, mut mic) = (None, None, false);
+            let mut it = args[2..].iter();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--frames" => frames = Some(it.next().context("--frames N")?.parse()?),
+                    "--audio" => wav = Some(PathBuf::from(it.next().context("--audio a.wav")?)),
+                    "--mic" => mic = true,
+                    f => bail!("unknown flag {f}"),
+                }
+            }
+            let audio = if mic {
+                app::AudioSource::Mic(live::MicAnalyzer::start()?)
+            } else {
+                // Default: the exemplar track (75 s, as in the README render), cached in out/.
+                let wav = wav.unwrap_or_else(|| PathBuf::from("out/keep-exemplar.wav"));
+                let track = live::prepare(&wav, 75.0)?;
+                let player = live::Player::start(&wav)?;
+                eprintln!("[run] playing {} ({:.1}s loop)", wav.display(), player.duration());
+                app::AudioSource::File { player, track }
             };
-            app::run(&script, frames)
+            app::run(&script, frames, audio)
         }
         Some("render") => offline::render(&parse_render(&args[1..])?),
         Some("probe") => probe(),

@@ -1,6 +1,8 @@
 //! app.rs — `keep run`: winit window, live Lua hot reload, free-fly camera.
 //! Keys: WASD/QE move, mouse-drag look, 1/2/3 (+shift = reverse) nudge extra XW/YW/ZW rotation
 //! on top of whatever Lua sets, [ ] nudge w_slice, R reset nudges, Esc quit.
+//! Audio: Space pause/resume, Left/Right seek ±5 s, M mute (visuals keep reacting).
+//! The scene clock `t` and the Features come from the audio playback position, not the wall clock.
 use std::{path::Path, sync::Arc, time::Instant};
 
 use winit::{
@@ -12,12 +14,20 @@ use winit::{
 };
 
 use crate::{
-    audio::Features,
     camera::FlyCamera,
     gpu::{renderer::CloudSpec, target::Swapchain, Renderer},
     math4d::{Affine4, Plane},
+    live::{MicAnalyzer, Player, Track},
     script::ScriptHost,
 };
+
+/// Where `t` and the audio features come from.
+pub enum AudioSource {
+    /// A looping WAV with its precomputed analysis.
+    File { player: Player, track: Track },
+    /// Live microphone; `t` is wall-clock time.
+    Mic(MicAnalyzer),
+}
 
 use glam::Vec3;
 
@@ -33,15 +43,14 @@ pub struct Nudges {
 }
 
 /// Open the window and run until closed (or after `max_frames` frames, for smoke tests).
-/// Features are zero for now (live input later); `t` is wall-clock seconds since start.
-pub fn run(script: &Path, max_frames: Option<u64>) -> anyhow::Result<()> {
+pub fn run(script: &Path, max_frames: Option<u64>, audio: AudioSource) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     // Poll = redraw continuously (an animation, not a document editor).
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         script: ScriptHost::load(script)?, max_frames, gpu: None, cam: FlyCamera::default(),
         nudges: Nudges::default(), start: Instant::now(), last: Instant::now(), frames: 0,
-        dragging: false, last_cursor: None, fast: false, error: None,
+        dragging: false, last_cursor: None, fast: false, error: None, audio,
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error { return Err(e); }
@@ -71,6 +80,7 @@ struct App {
     last_cursor: Option<(f64, f64)>,
     fast: bool,
     error: Option<anyhow::Error>,
+    audio: AudioSource,
 }
 
 impl App {
@@ -84,10 +94,13 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f32().min(0.1);
         self.last = now;
-        let t = (now - self.start).as_secs_f32();
+        let (t, f) = match &mut self.audio {
+            AudioSource::File { player, track } => { let pt = player.time(); (pt as f32, track.at(pt)) }
+            AudioSource::Mic(mic) => ((now - self.start).as_secs_f32(), mic.poll()),
+        };
 
         self.script.poll_reload();
-        let mut desc = self.script.update(t, &Features::default())?;
+        let mut desc = self.script.update(t, &f)?;
         // Layer the keyboard nudges *after* the script's own transform (applied last).
         let n = self.nudges;
         let extra = Affine4::rotation(Plane::ZW, n.zw)
@@ -101,9 +114,9 @@ impl App {
         let size = gpu.window.inner_size();
         if size.width == 0 || size.height == 0 { return Ok(()); } // minimized
         let aspect = size.width as f32 / size.height as f32;
-        let params = desc.to_params(t, glam::Vec4::ZERO, self.cam.camera(), aspect, gpu.renderer.cloud.count);
+        let params = desc.to_params(t, f.as_vec4(), self.cam.camera(), aspect, gpu.renderer.cloud.count);
         let mean = gpu.renderer.mean_luma();
-        gpu.renderer.glitch = crate::glitch::resolve(&desc.glitch, t, &Features::default(), mean, self.frames as u32);
+        gpu.renderer.glitch = crate::glitch::resolve(&desc.glitch, t, &f, mean, self.frames as u32);
         if !gpu.renderer.render_present(&mut gpu.swapchain, &params)? {
             // Out of date (resize): rebuild at the window's current size and try next frame.
             unsafe { gpu.renderer.ctx.device.device_wait_idle()? };
@@ -182,6 +195,15 @@ impl App {
             KeyCode::BracketRight => self.nudges.w_slice += 0.02,
             KeyCode::KeyR => self.nudges = Nudges::default(),
             KeyCode::Escape => el.exit(),
+            KeyCode::Space | KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::KeyM if !ev.repeat || code != KeyCode::Space => {
+                let AudioSource::File { player, .. } = &self.audio else { return };
+                match code {
+                    KeyCode::Space => eprintln!("[run] {}", if player.toggle_pause() { "paused" } else { "playing" }),
+                    KeyCode::ArrowLeft => player.seek(-5.0),
+                    KeyCode::ArrowRight => player.seek(5.0),
+                    _ => eprintln!("[run] {}", if player.toggle_mute() { "muted" } else { "unmuted" }),
+                }
+            }
             _ => {}
         }
     }

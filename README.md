@@ -14,10 +14,13 @@ Rendering is Vulkan (via `ash` on MoltenVK), shaders are GLSL compiled to SPIR-V
 ```sh
 mise install                          # rust, ffmpeg, MoltenVK; sets KEEP_VULKAN_LIB
 mise exec -- cargo build --release
-mise exec -- cargo test               # 28 tests (GPU tests skip if no Vulkan)
+mise exec -- cargo test               # 35 tests (GPU tests skip if no Vulkan)
 
-# live window, hot-reloads the script on save
-mise exec -- ./target/release/keep run scripts/exemplar.lua
+# live window with music, hot-reloads the script on save. Without --audio it plays the
+# exemplar track (synthesized to out/keep-exemplar.wav on first run, 75 s, looped).
+mise exec -- ./target/release/keep run scripts/exemplar.lua [--audio a.wav] [--frames N]
+# or react to the default microphone instead (realtime FFT, same features)
+mise exec -- ./target/release/keep run scripts/exemplar.lua --mic
 
 # offline render (synthesizes <out>.wav if --audio is missing or absent)
 mise exec -- ./target/release/keep render scripts/exemplar.lua \
@@ -36,7 +39,17 @@ The exemplar (75 s, 1080p60, ~95 s to render on an M5 Pro, glitch chain included
 | 1 / 2 / 3 (+Shift reverses) | add extra XW / YW / ZW rotation on top of the script |
 | [ / ] | nudge the w slice |
 | R | reset nudges |
+| Space | pause / resume the music (visuals freeze with it) |
+| ← / → | seek −5 s / +5 s (wraps around the loop) |
+| M | mute (visuals keep reacting) |
 | Esc | quit |
+
+In `keep run` the scene clock `t` and the features `f` come from the audio playback position:
+the track is analyzed up front exactly like `keep render` (at 60 features/s) and looked up,
+interpolated, at the current playback time, so the shape and the glitch chain stay locked to the
+sound through pauses and seeks. With `--mic` there is no transport; `t` is wall-clock time and the
+features come from a streaming analyzer (levels normalized against a ~10 s running peak, tempo
+re-estimated every second from the last 8 s of onsets).
 
 ## Lua API
 

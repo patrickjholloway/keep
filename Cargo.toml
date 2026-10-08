@@ -21,6 +21,8 @@ anyhow = "1"
 hound = "3"
 realfft = "3"
 rand = { version = "0.8", features = ["small_rng"] }
+# Live playback + mic input.
+cpal = "0.15"
 
 [build-dependencies]
 # GLSL -> SPIR-V at build time, pure Rust (no shaderc / glslang needed).

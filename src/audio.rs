@@ -289,7 +289,7 @@ fn render(spec: &TrackSpec) -> (Vec<f32>, Vec<f32>) {
 // Raw values are normalized by their 99th percentile over the whole track, then smoothed
 // with an attack/release envelope follower so visuals react fast and relax gracefully.
 
-const WIN: usize = 2048;
+pub(crate) const WIN: usize = 2048;
 
 /// Read any 16/24/32-bit int or float WAV and mix it to mono f32.
 fn read_mono(wav: &Path) -> anyhow::Result<(Vec<f32>, f32)> {
@@ -371,7 +371,7 @@ fn raw_features(mono: &[f32], sr: f32, fps: f32) -> [Vec<f32>; 5] {
 }
 
 /// Estimate (period in frames, phase offset in frames) from the onset curve by autocorrelation.
-fn estimate_beat(onset: &[f32], fps: f32) -> Option<(f32, f32)> {
+pub(crate) fn estimate_beat(onset: &[f32], fps: f32) -> Option<(f32, f32)> {
     let lag_lo = (fps * 60.0 / 180.0).floor() as usize;
     let lag_hi = (fps * 60.0 / 70.0).ceil() as usize;
     if onset.len() < lag_hi * 4 { return None; }
