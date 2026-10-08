@@ -1,5 +1,6 @@
 //! renderer.rs — owns GPU resources and records a frame:
-//!   upload SceneParams -> FieldPass (compute) -> barrier -> ParticlePass (HDR, additive)
+//!   upload SceneParams -> FieldPass (compute) -> barrier -> SurfacePass (compute, readback)
+//!   -> ParticlePass (HDR, additive)
 //!   -> barrier -> GlitchPass (compute chain, HDR <-> scratch) -> barrier -> TonemapPass (8-bit)
 //!   -> (offscreen readback | present).
 //!
@@ -13,12 +14,13 @@ use anyhow::Context;
 use ash::vk;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
-use crate::{glitch::GlitchParams, scene::SceneParams};
+use crate::{glitch::GlitchParams, scene::SceneParams, sonify::SurfaceDescriptor};
 
 use super::{
     buffers::Buffer,
     glitch::GlitchPass,
     passes::{FieldPass, ParticlePass, SceneBindings, TonemapPass, TonemapPush, HDR_FORMAT},
+    surface::SurfacePass,
     target::{Offscreen, Swapchain, OFFSCREEN_FORMAT},
     GpuContext,
 };
@@ -78,6 +80,11 @@ pub struct Renderer {
     pub particle_pass: ParticlePass,
     pub tonemap: TonemapPass,
     pub glitch_pass: GlitchPass,
+    pub surface_pass: SurfacePass,
+    /// Surface descriptor of the most recently COMPLETED frame (see gpu/surface.rs): updated
+    /// after every fence wait. In `keep run` that is the previous frame, in `keep render` the
+    /// frame just rendered.
+    pub surface: SurfaceDescriptor,
     /// Glitch parameters for the next frame (set by the caller; default = all bypassed).
     pub glitch: GlitchParams,
     /// Tonemap knobs: x = exposure, y = beat rise, z = time, w = bass (y/z/w overwritten per frame). Free to tweak x between frames.
@@ -103,7 +110,9 @@ impl Renderer {
         seeds.write(&jittered_grid(&cloud));
         // Droplets are GPU-only: written by compute, read by the vertex shader.
         let droplets = Buffer::new(&ctx, cloud.count as u64 * DROPLET_BYTES, vk::BufferUsageFlags::STORAGE_BUFFER, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
-        let bindings = SceneBindings::new(&ctx, scene_ubo.buffer, seeds.buffer, droplets.buffer)?;
+        let surface_buf = SurfacePass::create_buffer(&ctx)?;
+        let bindings = SceneBindings::new(&ctx, scene_ubo.buffer, seeds.buffer, droplets.buffer, surface_buf.buffer)?;
+        let surface_pass = SurfacePass::new(&ctx, &bindings, surface_buf)?;
         let field_pass = FieldPass::new(&ctx, &bindings)?;
         let particle_pass = ParticlePass::new(&ctx, &bindings, HDR_FORMAT)?;
         let tonemap = TonemapPass::new(&ctx, out_format)?;
@@ -121,7 +130,7 @@ impl Renderer {
         };
         Ok(Renderer {
             ctx, cloud, scene_ubo, seeds, droplets, bindings, field_pass, particle_pass, tonemap,
-            glitch_pass, glitch: GlitchParams::default(),
+            glitch_pass, surface_pass, surface: SurfaceDescriptor::default(), glitch: GlitchParams::default(),
             tonemap_knobs: [1.0, 0.0, 0.0, 0.0], pool, cmd, frame_fence, image_available,
             tonemap_input: vk::ImageView::null(),
         })
@@ -155,6 +164,8 @@ impl Renderer {
             d.wait_for_fences(&[self.frame_fence], true, u64::MAX)?;
             d.reset_fences(&[self.frame_fence])?;
         }
+        // The previous frame is complete: its surface descriptor is final in mapped memory.
+        self.surface_pass.read(&mut self.surface);
         let mut p = *params;
         p.counts[0] = p.counts[0].min(self.cloud.count);
         if p.counts[0] == 0 {
@@ -190,9 +201,13 @@ impl Renderer {
         ctx.memory_barrier(cmd, S::VERTEX_SHADER, A::SHADER_STORAGE_READ, S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE);
         self.field_pass.record(ctx, cmd, &self.bindings, count);
 
-        // (2) Compute writes -> vertex shader reads (read-after-write on the Droplets buffer).
-        //     Without this the vertex shader could fetch stale/partial droplets.
-        ctx.memory_barrier(cmd, S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, S::VERTEX_SHADER, A::SHADER_STORAGE_READ);
+        // (2) Compute writes -> vertex shader AND the surface pass read (read-after-write on the
+        //     Droplets buffer). Without this they could fetch stale/partial droplets.
+        ctx.memory_barrier(cmd, S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, S::VERTEX_SHADER | S::COMPUTE_SHADER, A::SHADER_STORAGE_READ);
+
+        // (2b) Surface descriptor for the sonify voice: bin the visible droplets (gpu/surface.rs).
+        //      Read-only on the droplets, so it changes nothing you see.
+        self.surface_pass.record(ctx, cmd, &self.bindings, count);
 
         // (3) HDR image -> COLOR_ATTACHMENT_OPTIMAL. old = UNDEFINED: we clear it anyway, so the
         //     previous contents can be discarded. Src = last frame's tonemap read of it.
@@ -260,6 +275,7 @@ impl Renderer {
             // record_readback = the bytes in the mapped buffer are final.
             d.wait_for_fences(&[self.frame_fence], true, u64::MAX)?;
         }
+        self.surface_pass.read(&mut self.surface);
         Ok(target.pixels())
     }
 
@@ -328,6 +344,7 @@ impl Drop for Renderer {
         }
         self.tonemap.destroy(ctx);
         self.glitch_pass.destroy(ctx);
+        self.surface_pass.destroy(ctx);
         self.particle_pass.destroy(ctx);
         self.field_pass.destroy(ctx);
         self.bindings.destroy(ctx);

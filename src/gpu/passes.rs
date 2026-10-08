@@ -26,7 +26,7 @@ pub fn shader_module(ctx: &GpuContext, spv: &[u8]) -> anyhow::Result<vk::ShaderM
     Ok(unsafe { ctx.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)? })
 }
 
-/// Shared descriptor set layout + pool + set for bindings 0..=2 (see gpu/mod.rs).
+/// Shared descriptor set layout + pool + set for bindings 0..=3 (see gpu/mod.rs).
 pub struct SceneBindings {
     pub layout: vk::DescriptorSetLayout,
     pub pool: vk::DescriptorPool,
@@ -35,7 +35,7 @@ pub struct SceneBindings {
 }
 
 impl SceneBindings {
-    pub fn new(ctx: &GpuContext, scene_ubo: vk::Buffer, seeds: vk::Buffer, droplets: vk::Buffer) -> anyhow::Result<SceneBindings> {
+    pub fn new(ctx: &GpuContext, scene_ubo: vk::Buffer, seeds: vk::Buffer, droplets: vk::Buffer, surface: vk::Buffer) -> anyhow::Result<SceneBindings> {
         let d = &ctx.device;
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let binding = |b: u32, ty: vk::DescriptorType| {
@@ -45,22 +45,24 @@ impl SceneBindings {
             binding(0, vk::DescriptorType::UNIFORM_BUFFER),
             binding(1, vk::DescriptorType::STORAGE_BUFFER),
             binding(2, vk::DescriptorType::STORAGE_BUFFER),
+            binding(3, vk::DescriptorType::STORAGE_BUFFER), // surface descriptor (surface.wgsl)
         ];
         unsafe {
             let layout = d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 },
             ];
             let pool = d.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None)?;
             let layouts = [layout];
             let set = d.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts))?[0];
             // Point the set's slots at our buffers (whole range each).
-            let infos = [scene_ubo, seeds, droplets].map(|b| [vk::DescriptorBufferInfo { buffer: b, offset: 0, range: vk::WHOLE_SIZE }]);
+            let infos = [scene_ubo, seeds, droplets, surface].map(|b| [vk::DescriptorBufferInfo { buffer: b, offset: 0, range: vk::WHOLE_SIZE }]);
             let writes = [
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&infos[0]),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&infos[1]),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(2).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&infos[2]),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(3).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&infos[3]),
             ];
             d.update_descriptor_sets(&writes, &[]);
             let pipeline_layout = d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None)?;

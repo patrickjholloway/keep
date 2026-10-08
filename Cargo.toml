@@ -25,10 +25,11 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm
 rand = { version = "0.8", features = ["small_rng"] }
 # Live playback + mic input.
 cpal = "0.15"
+wide = "1.7.1"
 
 [build-dependencies]
 # GLSL -> SPIR-V at build time, pure Rust (no shaderc / glslang needed).
-naga = { version = "25", features = ["glsl-in", "spv-out"] }
+naga = { version = "25", features = ["glsl-in", "wgsl-in", "spv-out"] }
 
 [profile.dev]
 opt-level = 1

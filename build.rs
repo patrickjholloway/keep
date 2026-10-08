@@ -1,4 +1,5 @@
 //! build.rs — compile shaders/*.{comp,vert,frag} (GLSL 450) to SPIR-V with naga.
+//! `.wgsl` files go through naga's WGSL frontend instead (needed for atomics: surface.wgsl).
 //! naga has no `#include`, so `#include "x.glsl"` lines are inlined textually here.
 //! Output: $OUT_DIR/<name>.spv, pulled in by src/gpu/shaders.rs via include_bytes!.
 use std::{env, fs, path::Path};
@@ -36,13 +37,24 @@ fn main() {
         let module = naga::front::glsl::Frontend::default()
             .parse(&naga::front::glsl::Options::from(stage), &src)
             .unwrap_or_else(|e| panic!("{file}: {}", e.emit_to_string(&src)));
-        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{file}: {}", e.emit_to_string(&src)));
-        let opts = naga::back::spv::Options { lang_version: (1, 3), ..Default::default() };
-        let words = naga::back::spv::write_vec(&module, &info, &opts, None).expect("spv");
-        fs::write(Path::new(&out).join(format!("{file}.spv")), bytemuck_cast(&words)).unwrap();
+        write_spv(&module, &src, file, &out);
     }
+    // WGSL shaders (naga's GLSL frontend has no atomics; its WGSL frontend does).
+    for file in ["surface.wgsl"] {
+        let src = fs::read_to_string(dir.join(file)).unwrap();
+        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{file}: {}", e.emit_to_string(&src)));
+        write_spv(&module, &src, file, &out);
+    }
+}
+
+/// Validate a parsed module and write `$OUT_DIR/<file>.spv`.
+fn write_spv(module: &naga::Module, src: &str, file: &str, out: &str) {
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(module)
+        .unwrap_or_else(|e| panic!("{file}: {}", e.emit_to_string(src)));
+    let opts = naga::back::spv::Options { lang_version: (1, 3), ..Default::default() };
+    let words = naga::back::spv::write_vec(module, &info, &opts, None).expect("spv");
+    fs::write(Path::new(out).join(format!("{file}.spv")), bytemuck_cast(&words)).unwrap();
 }
 
 fn bytemuck_cast(words: &[u32]) -> Vec<u8> {

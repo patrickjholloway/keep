@@ -3,6 +3,7 @@
 //!   keep run    scripts/scene.lua [--audio a.flac|.wav|.mp3|.ogg|.m4a | --mic] [--frames N]   (N = exit after N frames; smoke test)
 //!   keep render scripts/scene.lua --audio out.wav --seconds N --fps 30 --size 1920x1080 --out out.mp4 [--particles N]
 //!   keep probe                       (list Vulkan devices; smoke test)
+//!   keep bench-sonify [--osc N] [--seconds S]   (sonify kernels: scalar vs wide vs NEON)
 //!
 //! See docs/ARCHITECTURE.md for the SceneParams contract and module ownership.
 mod app;
@@ -17,6 +18,8 @@ mod math4d;
 mod offline;
 mod scene;
 mod script;
+mod sonify;
+mod triple;
 
 use std::path::PathBuf;
 
@@ -52,7 +55,20 @@ fn main() -> anyhow::Result<()> {
         }
         Some("render") => offline::render(&parse_render(&args[1..])?),
         Some("probe") => probe(),
-        _ => bail!("usage: keep run <scene.lua> | keep render <scene.lua> --audio a.flac|.wav|.mp3|.ogg|.m4a --seconds N --fps 30 --size WxH --out out.mp4 | keep probe"),
+        Some("bench-sonify") => {
+            let (mut osc, mut secs) = (sonify::NBINS, 4.0f32);
+            let mut it = args[1..].iter();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--osc" => osc = it.next().context("--osc N")?.parse()?,
+                    "--seconds" => secs = it.next().context("--seconds S")?.parse()?,
+                    f => bail!("unknown flag {f}"),
+                }
+            }
+            sonify::bench(osc, secs);
+            Ok(())
+        }
+        _ => bail!("usage: keep run <scene.lua> | keep render <scene.lua> --audio a.flac|.wav|.mp3|.ogg|.m4a --seconds N --fps 30 --size WxH --out out.mp4 | keep probe | keep bench-sonify [--osc N] [--seconds S]"),
     }
 }
 

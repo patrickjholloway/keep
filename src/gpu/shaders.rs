@@ -17,3 +17,4 @@ pub const GLITCH_WARP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/glitch_
 pub const GLITCH_SPECTRAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/glitch_spectral.comp.spv"));
 pub const GLITCH_CRUSH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/glitch_crush.comp.spv"));
 pub const GLITCH_STATS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/glitch_stats.comp.spv"));
+pub const SURFACE_COMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/surface.wgsl.spv"));

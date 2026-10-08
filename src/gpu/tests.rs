@@ -150,3 +150,31 @@ fn every_glitch_module_runs_and_changes_the_frame() {
         assert!(lit > 200, "{name} blacked out the frame");
     }
 }
+
+/// The surface pass sees the hypersphere slice: a sphere of radius sqrt(1 - 0.4²) ≈ 0.917
+/// around the origin, smooth (low roughness), covering nearly every octahedral bin.
+#[test]
+fn surface_descriptor_reads_the_slice() {
+    if !have_gpu() { return; }
+    let _gpu = GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (w, h, n) = (320u32, 240u32, 1_000_000u32);
+    let (mut r, mut target) = Renderer::new_offscreen(CloudSpec { count: n, half_extent: 1.5, seed: 1 }, w, h).unwrap();
+    let params = hypersphere_params(w, h, n);
+    // Frame 1 bins around (0,0,0); frame 2 around frame 1's centroid (also ~0).
+    r.render_offscreen(&target, &params).unwrap();
+    r.render_offscreen(&target, &params).unwrap();
+    let s = r.surface.clone();
+    target.destroy(&r.ctx);
+    let expect = (1.0f32 - 0.16).sqrt();
+    let lit = s.bins.iter().filter(|b| b.count > 0).count();
+    let mean_r = s.bins.iter().map(|b| b.count as f32 * b.radius).sum::<f32>() / s.total as f32;
+    let mean_rough = s.bins.iter().map(|b| b.count as f32 * b.rough).sum::<f32>() / s.total as f32;
+    let binned: u32 = s.bins.iter().map(|b| b.count).sum();
+    eprintln!("surface: total {} lit bins {lit} mean r {mean_r:.3} (expect {expect:.3}) rough {mean_rough:.3} centroid {:?}", s.total, s.centroid);
+    assert!(s.total > 10_000, "visible beads {}", s.total);
+    assert_eq!(binned, s.total, "every visible bead lands in exactly one bin");
+    assert!(lit > 950, "lit bins {lit}");
+    assert!((mean_r - expect).abs() < 0.03, "mean radius {mean_r}");
+    assert!(mean_rough < 0.1, "roughness {mean_rough}");
+    assert!(s.centroid.iter().all(|c| c.abs() < 0.02), "centroid {:?}", s.centroid);
+}

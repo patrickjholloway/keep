@@ -4,6 +4,7 @@
 //!   target.rs    render targets: `Offscreen` (color image + readback) and `Swapchain` (window)
 //!   passes.rs    `FieldPass` (compute: seeds -> droplets) and `ParticlePass` (billboard draw)
 //!   shaders.rs   SPIR-V produced by build.rs
+//!   surface.rs   `SurfacePass`: atomics bin the visible beads -> host-visible readback (sonify)
 //!   glitch.rs    `GlitchPass`: image-plane glitch chain (compute) between particles and tonemap
 //!   renderer.rs  `Renderer`: owns all of the above and records one frame
 //!
@@ -11,12 +12,14 @@
 //!   binding 0  uniform  Scene      (SceneParams)       compute + vertex + fragment
 //!   binding 1  storage  Seeds      (vec4 per particle)  compute
 //!   binding 2  storage  Droplets   (Droplet per particle) compute (write) + vertex (read)
+//!   binding 3  storage  Surface    (surface descriptor)  compute (atomics) -> host read
 pub mod buffers;
 pub mod context;
 pub mod glitch;
 pub mod passes;
 pub mod renderer;
 pub mod shaders;
+pub mod surface;
 pub mod target;
 
 pub use context::GpuContext;
