@@ -106,3 +106,7 @@ analytic sphere; `tonemap.frag` does bloom, hue-preserving tonemapping, grading 
   of the drop.
 - The climax shapes are still fairly rounded blobs rather than crisply faceted forms.
 - MoltenVK only has been tested (Apple GPU); other Vulkan drivers should work but are untried.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
