@@ -14,7 +14,7 @@ Rendering is Vulkan (via `ash` on MoltenVK), shaders are GLSL compiled to SPIR-V
 ```sh
 mise install                          # rust, ffmpeg, MoltenVK; sets KEEP_VULKAN_LIB
 mise exec -- cargo build --release
-mise exec -- cargo test               # 35 tests (GPU tests skip if no Vulkan)
+mise exec -- cargo test               # 46 tests (GPU tests skip if no Vulkan)
 
 # live window with music, hot-reloads the script on save. Without --audio it plays the
 # exemplar track (synthesized to out/keep-exemplar.wav on first run, 75 s, looped).
@@ -31,6 +31,11 @@ mise exec -- ./target/release/keep render scripts/exemplar.lua \
     --seconds 75 --fps 60 --size 1920x1080 --out out/keep-exemplar.mp4 [--audio a.wav] [--particles 750000]
 ```
 
+`keep render` also writes `<out>.sonify.wav` (the sonification voice alone) and `<out>.mix.wav`
+(music + voice, the track muxed into the video) whenever the script enables `sonify`.
+`mise exec -- ./target/release/keep bench-sonify [--osc N] [--seconds S]` benchmarks the voice's
+SIMD kernels (see [Sonification](#sonification)).
+
 The exemplar (75 s, 1080p60, ~95 s to render on an M5 Pro, glitch chain included) is at `renders/keep-exemplar.mp4`
 (not committed); stills are in `renders/stills/`.
 
@@ -45,7 +50,8 @@ The exemplar (75 s, 1080p60, ~95 s to render on an M5 Pro, glitch chain included
 | R | reset nudges |
 | Space | pause / resume the music (visuals freeze with it) |
 | ← / → | seek −5 s / +5 s (wraps around the loop) |
-| M | mute (visuals keep reacting) |
+| M | mute the music (visuals keep reacting) |
+| V | toggle the sonification voice (off by default with `--mic`) |
 | Esc | quit |
 
 In `keep run` the scene clock `t` and the features `f` come from the audio playback position:
@@ -70,7 +76,7 @@ The `hyper` prelude provides:
   `hyper.translate(x,y,z,w)`, `hyper.scale(...)`, `hyper.shear(dst, src, k)`.
 - helpers: `clamp`, `lerp`, `smoothstep`, `pulse(phase, sharp)`, `ease`, `tri(t, period)`, `tau`.
 
-Scene keys returned: `field` (list of shapes), `transform` (whole-object 4D transform), `w_slice`,
+Scene keys returned (the `sonify` table is separate, see [Sonification](#sonification)): `field` (list of shapes), `transform` (whole-object 4D transform), `w_slice`,
 `surface_width`, `particle_radius`, `temperature` (`{cold, hot}` in kelvin), `exposure`,
 `reflectivity`, `palette` (-1 amber .. 0 teal .. +1 magenta), `beat_rise` (beat ring trigger),
 `camera` (`eye`, `target`, `fov`, `roll`).
@@ -128,6 +134,99 @@ glitch.set("warp.c", 0, -0.4); glitch.set("warp.amount", 0.5)
 
 Time alone drives the 9 s slice sweep (shapes are born, swell and vanish), the slow camera orbit
 and the palette drift, which follows the slice position.
+
+## Sonification
+
+The loop closes: sound drives the 4D form, and the visible slice of the form is played back as
+sound. A bank of 1024 sine partials (`src/sonify.rs`) — one per direction bin of the slice —
+sits under the music.
+
+**GPU → CPU.** After `field.comp`, a compute pass (`shaders/surface.wgsl`, recorded by
+`src/gpu/surface.rs`) bins every visible bead by its direction from the slice centroid into a
+32 × 32 **octahedral** map (the sphere folded onto an octahedron and unfolded into a square: no
+pole pinch, cheap encode). Per bin it accumulates count, heat (where the bead sits between
+the cold inner shell and the hot edge), roughness `1 − n·r̂` (0 on a smooth outward bulge, ~1 on
+creases and pinch-off necks: a curvature stand-in without second derivatives) and radius from
+the centroid. Workgroups histogram in shared memory with integer atomics and flush only
+non-empty bins to a 16 KiB host-visible buffer (`vkCmdFillBuffer` clears it, a COMPUTE→HOST
+barrier + the frame fence make it readable). The pass is WGSL because naga's GLSL frontend has
+no atomics. The next frame bins around this frame's centroid (push constant). It only reads the
+droplets: renders are bit-identical with and without it.
+
+**Mapping** (per bin; the knobs are `sonify.*`):
+
+| surface | sound |
+| --- | --- |
+| bead count | amplitude `sqrt(count / total)` (power-normalized, so loudness doesn't depend on how many bins are lit) |
+| bin height + radius vs. the mean + roughness | pitch position `x = 0.45·height + 0.45·radius + 0.1·roughness` → `base + span·x` semitones, snapped to `scale` in `key` (with 0.4-semitone hysteresis) |
+| heat | brightness: self phase modulation `sin(φ + β sin φ)`, `β = 0.35·brightness·heat` cycles |
+| bin direction (x) | constant-power pan, times `spread` |
+| total visible beads | presence: fades out as the slice empties |
+
+So a round slice is a balanced chord across the span (the top of the form sings high, bulges
+sharper than dents), creases push partials up, a hot shell buzzes, and the stereo image follows
+the form. Every parameter is smoothed per sample (one-pole, `smoothing` seconds; pitch 10×
+faster when quantized so notes step rather than slur), and the summed voice passes a soft
+limiter `x/√(1+x²)`, so it can never exceed full scale.
+
+```lua
+sonify.enable = true            -- default false
+sonify.gain = 0.05              -- 0.12   level under the limiter
+sonify.base, sonify.span = 38, 36   -- 45, 36   lowest MIDI note, range in semitones
+sonify.key = "D"                -- "C"    name or 0..11
+sonify.scale = "minor_pentatonic"   -- "pentatonic"; also major minor dorian harmonic_minor
+                                --        whole_tone fifths chromatic, or a list {0, 3, 7}
+sonify.quantize = true          -- true   false = continuous pitch
+sonify.brightness = 0.4         -- 0.5    heat -> phase-modulation depth
+sonify.spread = 0.9             -- 0.8    stereo width
+sonify.smoothing = 0.08         -- 0.05   seconds
+```
+
+The exemplar plays it in D minor pentatonic (the synthesized track loops Dm–B♭–F–C). Measured on
+a render: voice ≈ −26 dB RMS in the intro, −32 in the groove and −35 under the drop (music
+−9…−10 dB), swelling to −23 in the bar 28–30 breather where the form is clean; ~91% of its
+energy (2 s from the intro) falls on D F G A C, the rest is the brightness harmonics.
+
+**Live and offline.** `keep run` mixes the voice into the music's output callback: the render
+thread publishes each frame's descriptor through a lock-free triple buffer (`src/triple.rs`) and
+the callback picks up the newest one; nothing in the voice path locks or allocates on the
+audio thread. One frame of latency. With `--mic` the voice gets its own output stream and starts
+**off** (speakers would feed it back into the mic); `V` enables it. `keep render` is
+frame-synchronous: frame *i*'s descriptor drives exactly samples `[i·sr/fps, (i+1)·sr/fps)` of
+the voice, which is mixed into the input audio as a single stereo track (most players only ever
+play a file's first audio stream), scaled down only if the sum would clip.
+
+**The SIMD pattern** (after [Everyone should know SIMD](https://mitchellh.com/writing/everyone-should-know-simd)).
+The bank is struct-of-arrays (`phase[] inc[] beta[] al[] ar[]` + targets), and one generic
+kernel, `render_block<V: Lanes>` in `src/sonify.rs`, is instantiated four times: `f32` (scalar
+reference), `wide::f32x4`, `wide::f32x8` (portable, stable Rust) and `neon::F32x4` (raw
+`std::arch::aarch64` intrinsics, `cfg(target_arch = "aarch64")`). It follows the five steps:
+**broadcast** constants once (`SinConsts`), **loop by vector width** over oscillators,
+**lane-parallel** branch-free math (smoothing, phase wrap with `round`, a fast sine that folds
+with `abs` and restores the sign with a bit select), **reduce** each sample's lane sums once with
+`reduce_add` and **store** the state back, and a **scalar remainder** for `n % W` oscillators.
+The fast sine is an odd Taylor polynomial to θ⁹ after folding to [0, π/2]: |error| < 4·10⁻⁶
+(−108 dB), measured in a test. Targets are floored at 10⁻¹² so decays never reach subnormal
+floats. Tests check every SIMD kernel against the scalar one (n = 1, 3, 7, 8, 13, 1027, odd
+chunk sizes), the error bound, the limiter bound, NaN/subnormal freedom after long silence, the
+octahedral binning, scale snapping, and the GPU pass against the analytic hypersphere slice.
+
+`keep bench-sonify` (1024 oscillators × 4 s at 48 kHz, Apple M5 Pro, release):
+
+| kernel | osc·samples/s | vs scalar | × realtime |
+| --- | --- | --- | --- |
+| scalar | 3.3e8 | 1.0× | 7× |
+| `wide::f32x4` | 1.24e9 | 3.8× | 25× |
+| `wide::f32x8` | 1.06e9 | 3.2× | 22× |
+| NEON `float32x4_t` | 1.18e9 | 3.6× | 24× |
+
+Lessons the numbers taught: before the constants were hoisted, `wide::f32x8` ran *slower* than
+scalar — on AArch64 it is two NEON halves, and each `splat` inside the loop compiled to a
+`memset_pattern16` call per sample (likewise `wide`'s `copysign`, which splats its sign mask).
+f32x8 still trails f32x4: twice the live state per iteration spills NEON's 32 registers.
+`wide::f32x4` and hand-written NEON land within a few percent of each other, i.e. the portable
+crate costs nothing once the hot loop is clean. Live audio uses NEON on AArch64, `f32x8` elsewhere;
+the whole voice costs ~4% of one core.
 
 ## Glitch modules
 
@@ -219,12 +318,17 @@ Read `src/gpu/` in this order:
 - `passes.rs` — the three passes: a compute pass (`field.comp`, one invocation per particle),
   an additive instanced billboard pass with no vertex buffers (dynamic rendering), and a
   fullscreen tonemap pass.
+- `surface.rs` — a GPU→CPU readback channel: workgroup-privatized integer atomics into a
+  host-visible, persistently mapped buffer, cleared with `vkCmdFillBuffer`, a TRANSFER→COMPUTE
+  and a COMPUTE→HOST barrier, a push constant fed back from the previous frame, and a second
+  pipeline layout over the same descriptor set.
 - `glitch.rs` — a chain of compute passes over storage images: two descriptor sets that differ
   only in which image is source vs destination (ping-pong), a shared pipeline layout with a
   push constant, compute→compute barriers, and conditional recording (bypass = no commands).
 - `renderer.rs` — recording a frame: upload params, dispatch, pipeline barriers between compute
   and graphics, glitch chain, tonemap, then readback or present.
-- `shaders.rs` / `build.rs` — GLSL to SPIR-V at build time, with a tiny `#include` inliner.
+- `shaders.rs` / `build.rs` — GLSL (and one WGSL file, for atomics) to SPIR-V at build time,
+  with a tiny `#include` inliner.
 - `png.rs`, `tests.rs` — a dependency-free PNG writer and GPU smoke tests.
 
 Shaders (`shaders/`): `common.glsl` is the std140 contract mirrored by `src/scene.rs`;
@@ -241,6 +345,8 @@ by `src/glitch.rs`); `tonemap.frag` does bloom, hue-preserving tonemapping, grad
   briefly go almost empty; the exemplar has a couple of near-blank moments (~12 s, ~30 s) by design
   of the drop.
 - The climax shapes are still fairly rounded blobs rather than crisply faceted forms.
+- The sonification voice has only been checked by measurement (levels, spectrum, pitch classes),
+  not by ear in every section; the mapping constants are a first pass.
 - The glitch chain is not audio-reactive in `keep run` (live mode has no audio input yet), but
   LFOs, `mean_luma` and script sources work there.
 - MoltenVK only has been tested (Apple GPU); other Vulkan drivers should work but are untried.

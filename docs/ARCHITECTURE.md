@@ -54,9 +54,24 @@ result.
 
 GPU buffers (set 0): binding 0 `Scene` UBO · binding 1 `Seeds` (vec4 per particle, fixed
 cloud) · binding 2 `Droplets` (compute writes pos/size, normal/d, emission/visibility;
-vertex reads). Frame = field.comp dispatch → buffer barrier → billboard draw (6 verts ×
+vertex reads) · binding 3 `Surface` (surface.wgsl's atomics; host-visible, read after the
+fence). Frame = field.comp dispatch → buffer barrier → fill + surface.wgsl dispatch →
+COMPUTE→HOST barrier → billboard draw (6 verts ×
 N instances, additive, no depth) → stats + active glitch passes (compute, HDR ⇄ scratch) →
 tonemap → readback (render) or present (run).
+
+## The third contract: the surface descriptor (shaders/surface.wgsl ⇄ src/sonify.rs)
+
+`Surface` = `header: i32[4]` (visible count, Σx, Σy, Σz at ×512 fixed point) + `bins:
+u32[1024 × 4]` (count, Σheat ×1024, Σroughness ×1024, Σradius ×1024), 32 × 32 octahedral bins
+around the previous frame's centroid (push constant). `SIDE`, `FX_*` and the octahedral encode
+are mirrored in `src/sonify.rs` (`SurfaceDescriptor::decode_from`, `from_beads` = CPU twin).
+`Renderer::surface` holds the last completed frame's descriptor. Voice data flow:
+
+```
+renderer.surface ─┬─ keep run:    VoiceSender ─► triple buffer ─► cpal callback: Sonifier::set_targets + render (mixed into the music)
+SceneDesc.sonify ─┘  keep render: Sonifier per frame ─► <out>.sonify.wav ─► + input ─► <out>.mix.wav ─► capture::mux
+```
 
 ## Lua scene table (returned from `update(t, f)`)
 
@@ -70,6 +85,9 @@ tonemap → readback (render) or present (run).
   reflectivity=0.6, exposure=1, camera={eye={..}, target={..}, fov=deg} -- camera optional }
 ```
 `f` = `{bass, mid, high, onset, rms, beat_phase}`. Script errors keep the last good scene.
+The prelude also installs a plain `sonify` table (`enable gain base span key scale quantize
+brightness spread smoothing`, see README "Sonification"); `script::parse_sonify` reads it after
+every `update` into `SceneDesc.sonify`, rejecting unknown keys.
 The prelude also installs the `glitch` patch bay (`set / patch / unpatch / lfo / source /
 clear`, see README); its state lives in Lua tables (`glitch._set/_patch/_lfo/_src`) that
 `script::parse_glitch` reads after every `update`.
@@ -85,6 +103,10 @@ clear`, see README); its state lives in Lua tables (`glitch._set/_patch/_lfo/_sr
 | `src/audio.rs` | original procedural track → WAV (hound); STFT analysis → Features per frame (realfft) |
 | `src/script.rs` | ScriptHost: mlua state, `hyper` + `glitch` helpers, notify hot reload, table → SceneDesc |
 | `src/glitch.rs` | **glitch contract**: GlitchParams, PARAMS table, GlitchDesc/Patch/Lfo, `resolve`; CPU references (Möbius, IIR, Stockham FFT, gate) + tests |
+| `src/sonify.rs` | **surface-descriptor contract** (CPU side), SonifyParams/Scale, the SIMD additive bank (scalar / wide / NEON), mapping, bench, tests |
+| `src/triple.rs` | lock-free triple buffer (render thread → audio callback) |
+| `src/gpu/surface.rs` | SurfacePass: readback buffer, fill + dispatch + barriers, centroid push constant |
+| `shaders/surface.wgsl` | visible-bead binning with workgroup + global integer atomics (WGSL: naga's GLSL frontend lacks atomics) |
 | `src/gpu/glitch.rs` | GlitchPass: glitch descriptor sets (ping-pong), pipelines, FFT/stat buffers, chain recording |
 | `shaders/glitch_common.glsl` | GLSL mirror of GlitchParams, image/buffer bindings, bilinear helper |
 | `shaders/glitch_*.comp` | sync, ring, smear, disp, warp, spectral (load/stage/filter/composite), crush, stats |
@@ -95,14 +117,15 @@ clear`, see README); its state lives in Lua tables (`glitch._set/_patch/_lfo/_sr
 | `src/gpu/renderer.rs` | Renderer: resources + frame recording, `render_offscreen` / `render_present` |
 | `shaders/field.comp` | per-particle 4D field eval, gradient normal, blackbody emission |
 | `shaders/particle.{vert,frag}` | billboards shaded as analytic spheres (specular + fresnel + emission) |
-| `src/capture.rs` | Encoder: raw RGBA → ffmpeg stdin (libx264 yuv420p) + AAC audio mux |
+| `src/capture.rs` | Encoder: raw RGBA → ffmpeg stdin (libx264 yuv420p); `mux` adds the AAC track afterwards |
 | `src/camera.rs` | FlyCamera (WASD/QE + mouse) |
 | `src/app.rs` | `keep run`: winit loop, hot reload, camera, XW/YW/ZW + w_slice nudges |
-| `src/offline.rs` | `keep render`: synth/analyze audio, deterministic frame loop, encode |
-| `src/main.rs` | CLI: `run`, `render`, `probe` |
-| `build.rs` | GLSL → SPIR-V via naga (inlines `#include "common.glsl"`) |
+| `src/offline.rs` | `keep render`: synth/analyze audio, deterministic frame loop, encode, frame-synchronous sonify voice + mix + mux |
+| `src/live.rs` | `keep run` audio: Track lookup, Player (cpal, music + voice in one callback), MicAnalyzer, voice channel |
+| `src/main.rs` | CLI: `run`, `render`, `probe`, `bench-sonify` |
+| `build.rs` | GLSL (+ WGSL) → SPIR-V via naga (inlines `#include "common.glsl"`) |
 
 ## Toolchain notes
 - Always `mise exec -- cargo …` / `mise exec -- ffmpeg …` (Rust 1.90, MoltenVK 1.4.2, conda:ffmpeg 9.0.2 with libx264/videotoolbox).
 - MoltenVK loaded directly does **not** offer `VK_KHR_portability_enumeration` (loader ext): enable only if listed. Device must enable `VK_KHR_portability_subset`.
-- naga GLSL frontend: no `#include` (build.rs inlines), no `writeonly` storage buffers.
+- naga GLSL frontend: no `#include` (build.rs inlines), no `writeonly` storage buffers, no atomics (use a `.wgsl` shader; build.rs picks the frontend by extension).
