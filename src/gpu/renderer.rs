@@ -1,6 +1,7 @@
 //! renderer.rs — owns GPU resources and records a frame:
 //!   upload SceneParams -> FieldPass (compute) -> barrier -> ParticlePass (HDR, additive)
-//!   -> barrier -> TonemapPass (8-bit) -> (offscreen readback | present).
+//!   -> barrier -> GlitchPass (compute chain, HDR <-> scratch) -> barrier -> TonemapPass (8-bit)
+//!   -> (offscreen readback | present).
 //!
 //! Synchronization model (deliberately simple, one frame in flight):
 //! * The CPU writes the uniform buffer, records one command buffer, submits, and — before the
@@ -12,10 +13,11 @@ use anyhow::Context;
 use ash::vk;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
-use crate::scene::SceneParams;
+use crate::{glitch::GlitchParams, scene::SceneParams};
 
 use super::{
     buffers::Buffer,
+    glitch::GlitchPass,
     passes::{FieldPass, ParticlePass, SceneBindings, TonemapPass, TonemapPush, HDR_FORMAT},
     target::{Offscreen, Swapchain, OFFSCREEN_FORMAT},
     GpuContext,
@@ -75,6 +77,9 @@ pub struct Renderer {
     pub field_pass: FieldPass,
     pub particle_pass: ParticlePass,
     pub tonemap: TonemapPass,
+    pub glitch_pass: GlitchPass,
+    /// Glitch parameters for the next frame (set by the caller; default = all bypassed).
+    pub glitch: GlitchParams,
     /// Tonemap knobs: x = exposure, y = beat rise, z = time, w = bass (y/z/w overwritten per frame). Free to tweak x between frames.
     pub tonemap_knobs: [f32; 4],
     pub pool: vk::CommandPool,
@@ -102,6 +107,7 @@ impl Renderer {
         let field_pass = FieldPass::new(&ctx, &bindings)?;
         let particle_pass = ParticlePass::new(&ctx, &bindings, HDR_FORMAT)?;
         let tonemap = TonemapPass::new(&ctx, out_format)?;
+        let glitch_pass = GlitchPass::new(&ctx)?;
         let d = &ctx.device;
         let (pool, cmd, frame_fence, image_available) = unsafe {
             let pool = d.create_command_pool(
@@ -115,6 +121,7 @@ impl Renderer {
         };
         Ok(Renderer {
             ctx, cloud, scene_ubo, seeds, droplets, bindings, field_pass, particle_pass, tonemap,
+            glitch_pass, glitch: GlitchParams::default(),
             tonemap_knobs: [1.0, 0.0, 0.0, 0.0], pool, cmd, frame_fence, image_available,
             tonemap_input: vk::ImageView::null(),
         })
@@ -170,16 +177,11 @@ impl Renderer {
 
     /// Record compute -> particles(HDR) -> tonemap(out). Leaves `out_image` in
     /// COLOR_ATTACHMENT_OPTIMAL with the tonemap's writes done.
-    fn record_frame(&mut self, hdr: (vk::Image, vk::ImageView), out_image: vk::Image, out_view: vk::ImageView, extent: vk::Extent2D, count: u32) {
+    fn record_frame(&mut self, hdr: (vk::Image, vk::ImageView), scratch: (vk::Image, vk::ImageView), out_image: vk::Image, out_view: vk::ImageView, extent: vk::Extent2D, count: u32) {
         use vk::{AccessFlags2 as A, ImageLayout as L, PipelineStageFlags2 as S};
         let ctx = &self.ctx;
         let cmd = self.cmd;
         let (hdr_image, hdr_view) = hdr;
-        if self.tonemap_input != hdr_view {
-            // Safe: we waited on the fence, so no in-flight frame uses the descriptor set.
-            self.tonemap.set_input(ctx, hdr_view);
-            self.tonemap_input = hdr_view;
-        }
 
         // (1) Compute: evaluate the 4D field per particle, write Droplets.
         //     Previous frame's vertex shader read the droplets; the fence already ordered that
@@ -196,18 +198,36 @@ impl Renderer {
         //     previous contents can be discarded. Src = last frame's tonemap read of it.
         ctx.image_barrier(
             cmd, hdr_image, L::UNDEFINED, L::COLOR_ATTACHMENT_OPTIMAL,
-            S::FRAGMENT_SHADER, A::SHADER_STORAGE_READ,
+            S::FRAGMENT_SHADER | S::COMPUTE_SHADER, A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
             S::COLOR_ATTACHMENT_OUTPUT, A::COLOR_ATTACHMENT_WRITE | A::COLOR_ATTACHMENT_READ,
         );
         self.particle_pass.record(ctx, cmd, &self.bindings, hdr_view, extent, count);
 
-        // (4) HDR: attachment writes -> fragment-shader storage reads, layout -> GENERAL
+        // (4) HDR: attachment writes -> compute/fragment storage access, layout -> GENERAL
         //     (the layout storage images must be in).
         ctx.image_barrier(
             cmd, hdr_image, L::COLOR_ATTACHMENT_OPTIMAL, L::GENERAL,
             S::COLOR_ATTACHMENT_OUTPUT, A::COLOR_ATTACHMENT_WRITE,
-            S::FRAGMENT_SHADER, A::SHADER_STORAGE_READ,
+            S::COMPUTE_SHADER | S::FRAGMENT_SHADER, A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
         );
+        // (4b) Scratch image -> GENERAL, contents discarded (every glitch pass that writes it
+        //      overwrites every pixel). Src = last frame's compute/tonemap use of it.
+        ctx.image_barrier(
+            cmd, scratch.0, L::UNDEFINED, L::GENERAL,
+            S::FRAGMENT_SHADER | S::COMPUTE_SHADER, A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
+            S::COMPUTE_SHADER, A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
+        );
+        // (4c) Glitch chain (compute). Bypassed modules record nothing. Its last barrier makes
+        //      the final image visible to later compute; add the compute -> fragment hop here.
+        let in_scratch = self.glitch_pass.record(ctx, cmd, &self.glitch, hdr_view, scratch.1, extent);
+        ctx.memory_barrier(cmd, S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, S::FRAGMENT_SHADER, A::SHADER_STORAGE_READ);
+        let final_view = if in_scratch { scratch.1 } else { hdr_view };
+        if self.tonemap_input != final_view {
+            // Safe: we waited on the fence, so no in-flight frame uses the descriptor set, and
+            // the set has not been bound in this command buffer yet.
+            self.tonemap.set_input(ctx, final_view);
+            self.tonemap_input = final_view;
+        }
         // (5) Output image -> COLOR_ATTACHMENT_OPTIMAL (contents discarded; fully overwritten).
         //     For a swapchain image the src stage matches the acquire semaphore's wait stage.
         ctx.image_barrier(
@@ -221,7 +241,7 @@ impl Renderer {
     /// Render one frame into the offscreen target and block until its RGBA pixels are readable.
     pub fn render_offscreen<'a>(&mut self, target: &'a Offscreen, params: &SceneParams) -> anyhow::Result<&'a [u8]> {
         let count = self.begin_frame(params)?;
-        self.record_frame((target.hdr.image, target.hdr.view), target.color.image, target.color.view, target.color.extent, count);
+        self.record_frame((target.hdr.image, target.hdr.view), (target.scratch.image, target.scratch.view), target.color.image, target.color.view, target.color.extent, count);
         target.record_readback(&self.ctx, self.cmd);
         let d = &self.ctx.device;
         unsafe {
@@ -254,7 +274,7 @@ impl Renderer {
             Err(e) => return Err(e).context("acquire_next_image"),
         };
         let (image, view) = (swapchain.images[idx as usize], swapchain.views[idx as usize]);
-        self.record_frame((swapchain.hdr.image, swapchain.hdr.view), image, view, swapchain.extent, count);
+        self.record_frame((swapchain.hdr.image, swapchain.hdr.view), (swapchain.scratch.image, swapchain.scratch.view), image, view, swapchain.extent, count);
         // Output -> PRESENT_SRC: the layout the presentation engine expects.
         self.ctx.image_barrier(
             self.cmd, image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR,
@@ -281,6 +301,13 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    /// Mean luminance of the most recently completed frame (patch-bay source `mean_luma`).
+    pub fn mean_luma(&self) -> f32 {
+        self.glitch_pass.mean_luma()
+    }
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
         // Runs before the fields drop, i.e. before GpuContext destroys the device.
@@ -292,6 +319,7 @@ impl Drop for Renderer {
             ctx.device.destroy_command_pool(self.pool, None);
         }
         self.tonemap.destroy(ctx);
+        self.glitch_pass.destroy(ctx);
         self.particle_pass.destroy(ctx);
         self.field_pass.destroy(ctx);
         self.bindings.destroy(ctx);

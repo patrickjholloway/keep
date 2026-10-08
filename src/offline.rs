@@ -2,12 +2,13 @@
 //! 1. ensure audio (synthesize if --audio path missing)   audio::synthesize
 //! 2. per-frame features                                   audio::analyze
 //! 3. for frame i: t = i/fps; desc = script.update(t, f[i]); params = desc.to_params(..)
+//!    renderer.glitch = glitch::resolve(desc.glitch, t, f[i], mean_luma of frame i-1)
 //! 4. renderer.render_offscreen -> encoder.push_frame;     capture::Encoder (muxes audio)
 use std::path::PathBuf;
 
 use glam::Vec3;
 
-use crate::{audio::{self, TrackSpec}, capture, gpu::{renderer::CloudSpec, Renderer}, scene::Camera, script::ScriptHost};
+use crate::{audio::{self, TrackSpec}, capture, glitch, gpu::{renderer::CloudSpec, Renderer}, scene::Camera, script::ScriptHost};
 
 #[derive(Clone, Debug)]
 pub struct RenderArgs {
@@ -58,6 +59,8 @@ pub fn render(args: &RenderArgs) -> anyhow::Result<()> {
             let desc = script.update(t, &f)?;
             let cam = desc.camera.unwrap_or_else(default_camera);
             let params = desc.to_params(t, f.as_vec4(), cam, aspect, args.particles);
+            // Glitch patch bay: resolve this frame's cables (mean_luma = the previous frame's).
+            renderer.glitch = glitch::resolve(&desc.glitch, t, &f, renderer.mean_luma(), i as u32);
             let px = renderer.render_offscreen(&target, &params)?;
             enc.push_frame(px)?;
             if i % args.fps as usize == 0 {

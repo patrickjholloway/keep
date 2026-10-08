@@ -4,6 +4,7 @@
 //!   target.rs    render targets: `Offscreen` (color image + readback) and `Swapchain` (window)
 //!   passes.rs    `FieldPass` (compute: seeds -> droplets) and `ParticlePass` (billboard draw)
 //!   shaders.rs   SPIR-V produced by build.rs
+//!   glitch.rs    `GlitchPass`: image-plane glitch chain (compute) between particles and tonemap
 //!   renderer.rs  `Renderer`: owns all of the above and records one frame
 //!
 //! Descriptor set 0 (shared by every shader, see shaders/common.glsl):
@@ -12,6 +13,7 @@
 //!   binding 2  storage  Droplets   (Droplet per particle) compute (write) + vertex (read)
 pub mod buffers;
 pub mod context;
+pub mod glitch;
 pub mod passes;
 pub mod renderer;
 pub mod shaders;

@@ -102,6 +102,8 @@ impl App {
         if size.width == 0 || size.height == 0 { return Ok(()); } // minimized
         let aspect = size.width as f32 / size.height as f32;
         let params = desc.to_params(t, glam::Vec4::ZERO, self.cam.camera(), aspect, gpu.renderer.cloud.count);
+        let mean = gpu.renderer.mean_luma();
+        gpu.renderer.glitch = crate::glitch::resolve(&desc.glitch, t, &Features::default(), mean, self.frames as u32);
         if !gpu.renderer.render_present(&mut gpu.swapchain, &params)? {
             // Out of date (resize): rebuild at the window's current size and try next frame.
             unsafe { gpu.renderer.ctx.device.device_wait_idle()? };

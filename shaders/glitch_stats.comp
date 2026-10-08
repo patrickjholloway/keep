@@ -1,0 +1,21 @@
+#version 450
+// glitch_stats.comp — cheap image statistics for the patch bay ("mean_luma" source).
+// A single invocation averages a 64×36 grid of HDR samples (2304 loads — microseconds), in the
+// tone-compressed domain L/(1+L) so the value stays in 0..1. The CPU reads it after the frame's
+// fence and feeds it to the NEXT frame's patch resolution (one frame of latency, like a real
+// envelope follower patched back into a synth).
+#include "glitch_common.glsl"
+layout(local_size_x = 1) in;
+
+void main() {
+    ivec2 size = imageSize(src);
+    float acc = 0.0;
+    for (int j = 0; j < 36; j++) {
+        for (int i = 0; i < 64; i++) {
+            ivec2 q = ivec2((vec2(i, j) + 0.5) / vec2(64.0, 36.0) * vec2(size));
+            float L = dot(imageLoad(src, q).rgb, LUMA);
+            acc += L / (1.0 + L);
+        }
+    }
+    stats = vec4(acc / 2304.0, 0.0, 0.0, 0.0);
+}

@@ -20,6 +20,7 @@ use notify::{RecursiveMode, Watcher};
 use crate::{
     audio::Features,
     field::{Field, Op, Prim, Shape},
+    glitch::{self, GlitchDesc, Lfo, LfoShape, Patch},
     math4d::{Affine4, Plane},
     scene::{Camera, SceneDesc},
 };
@@ -54,6 +55,25 @@ function hyper.pulse(phase, sharp) return math.exp(-(sharp or 6) * phase) end
 function hyper.ease(s) s = hyper.clamp(s, 0, 1); return 0.5 - 0.5 * math.cos(math.pi * s) end
 -- triangle wave in 0..1 with given period
 function hyper.tri(t, period) local p = (t / period) % 1; return 1 - math.abs(2 * p - 1) end
+
+-- glitch patch bay (image-plane effects; see README "Glitch modules"). State persists across
+-- frames until changed; Rust reads it after every update() and resolves it per frame.
+glitch = { _set = {}, _patch = {}, _lfo = {}, _src = {} }
+-- base value; complex params take (re, im): glitch.set("warp.a", 0.9, 0.3)
+function glitch.set(name, v, im)
+  if im ~= nil then glitch._set[name .. ".re"] = v; glitch._set[name .. ".im"] = im
+  else glitch._set[name] = v end
+end
+-- cable: dst += gain * src + offset (one cable per src/dst pair; re-patching replaces it)
+function glitch.patch(src, dst, gain, offset)
+  glitch._patch[src .. "->" .. dst] = { src = src, dst = dst, gain = gain or 1, offset = offset or 0 }
+end
+function glitch.unpatch(src, dst) glitch._patch[src .. "->" .. dst] = nil end
+-- unipolar 0..1 oscillator usable as a source: glitch.lfo("wobble", "sine", 0.5 [, phase])
+function glitch.lfo(name, shape, rate, phase) glitch._lfo[name] = { shape = shape, rate = rate, phase = phase or 0 } end
+-- script-computed source value (e.g. an envelope): glitch.source("drop", x)
+function glitch.source(name, v) glitch._src[name] = v end
+function glitch.clear() glitch._set, glitch._patch, glitch._src = {}, {}, {} end
 "#;
 
 pub struct ScriptHost {
@@ -123,7 +143,11 @@ impl ScriptHost {
             ft.set(k, v).map_err(lua_err)?;
         }
         let ret: Table = update.call((t, ft)).map_err(lua_err).context("update(t, f)")?;
-        parse_scene(&ret)
+        let mut desc = parse_scene(&ret)?;
+        if let Some(g) = self.lua.globals().get::<Option<Table>>("glitch").map_err(lua_err)? {
+            desc.glitch = parse_glitch(&g).context("glitch")?;
+        }
+        Ok(desc)
     }
 }
 
@@ -263,7 +287,40 @@ pub fn parse_scene(t: &Table) -> anyhow::Result<SceneDesc> {
         palette: num(t, "palette", 0.0)?,
         beat_rise: num(t, "beat_rise", 0.0)?,
         camera,
+        glitch: GlitchDesc::default(),
     })
+}
+
+/// Read the prelude's `glitch` state tables into a GlitchDesc, validating names.
+pub fn parse_glitch(g: &Table) -> anyhow::Result<GlitchDesc> {
+    let mut d = GlitchDesc::default();
+    let tbl = |k: &str| -> anyhow::Result<Table> { g.get::<Table>(k).map_err(lua_err) };
+    for pair in tbl("_lfo")?.pairs::<String, Table>() {
+        let (name, l) = pair.map_err(lua_err)?;
+        let shape: String = l.get("shape").map_err(lua_err)?;
+        d.lfos.insert(name.clone(), Lfo { shape: LfoShape::parse(&shape).with_context(|| format!("lfo `{name}`"))?, rate: num(&l, "rate", 1.0)?, phase: num(&l, "phase", 0.0)? });
+    }
+    for pair in tbl("_src")?.pairs::<String, f32>() {
+        let (name, v) = pair.map_err(lua_err)?;
+        d.sources.insert(name, v);
+    }
+    for pair in tbl("_set")?.pairs::<String, f32>() {
+        let (name, v) = pair.map_err(lua_err)?;
+        let i = glitch::param_index(&name).ok_or_else(|| anyhow!("glitch.set: unknown parameter `{name}`"))?;
+        d.sets.insert(i, v);
+    }
+    let mut patches: Vec<(String, Patch)> = Vec::new();
+    for pair in tbl("_patch")?.pairs::<String, Table>() {
+        let (key, p) = pair.map_err(lua_err)?;
+        let src: String = p.get("src").map_err(lua_err)?;
+        let dst: String = p.get("dst").map_err(lua_err)?;
+        let di = glitch::param_index(&dst).ok_or_else(|| anyhow!("glitch.patch: unknown destination `{dst}`"))?;
+        if !d.is_known_source(&src) { bail!("glitch.patch: unknown source `{src}` (define it with glitch.lfo / glitch.source)"); }
+        patches.push((key, Patch { src, dst: di, gain: num(&p, "gain", 1.0)?, offset: num(&p, "offset", 0.0)? }));
+    }
+    patches.sort_by(|a, b| a.0.cmp(&b.0)); // Lua table order is unspecified; keep it deterministic
+    d.patches = patches.into_iter().map(|p| p.1).collect();
+    Ok(d)
 }
 
 #[cfg(test)]
@@ -317,6 +374,27 @@ mod tests {
         h.poll_reload();
         assert_eq!(h.update(0.25, &Features::default()).unwrap().w_slice, 0.25);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glitch_api_parses_and_validates() {
+        let lua = Lua::new();
+        lua.load(PRELUDE).exec().unwrap();
+        lua.load(r#"glitch.set("sync.depth", 0.1); glitch.set("warp.a", 0.5, 0.25)
+            glitch.lfo("w", "tri", 2); glitch.patch("w", "ring.depth", 0.5, 0.1)
+            glitch.patch("bass", "sync.depth", 0.3); glitch.patch("bass", "sync.depth", 0.4)"#).exec().unwrap();
+        let g: Table = lua.globals().get("glitch").unwrap();
+        let d = parse_glitch(&g).unwrap();
+        assert_eq!(d.patches.len(), 2, "re-patching the same cable replaces it");
+        assert_eq!(d.sets[&glitch::param_index("warp.a.im").unwrap()], 0.25);
+        let f = Features { bass: 1.0, ..Default::default() };
+        let v = glitch::resolve_values(&d, 0.25, &f, 0.0);
+        assert!((v[glitch::param_index("sync.depth").unwrap()] - 0.5).abs() < 1e-6);
+        assert!((v[glitch::param_index("ring.depth").unwrap()] - (0.5 * 1.0 + 0.1)).abs() < 1e-6);
+        lua.load(r#"glitch.patch("nope", "sync.depth", 1)"#).exec().unwrap();
+        assert!(parse_glitch(&g).is_err(), "unknown source must be rejected");
+        lua.load(r#"glitch.clear(); glitch.set("sync.bogus", 1)"#).exec().unwrap();
+        assert!(parse_glitch(&g).is_err(), "unknown parameter must be rejected");
     }
 
     #[test]

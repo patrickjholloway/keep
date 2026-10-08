@@ -1,0 +1,47 @@
+#version 450
+// glitch_disp.comp — DISPERSION: a prism / lens that bends each wavelength differently.
+//
+// Glass has a wavelength-dependent refractive index; Cauchy's approximation
+//     n(λ) ≈ A + B/λ²
+// so short (blue) wavelengths bend more than long (red) ones. We render that as a per-
+// wavelength image displacement proportional to n(λ) − n(550 nm):
+//     k(λ) = (1/λ² − 1/550²) / (1/400² − 1/700²)        (≈ −0.37 at 700 nm, +0.63 at 400 nm)
+//     offset(λ) = k(λ) · depth · dir(p)
+// dir(p) is either RADIAL (distance from the frame centre, like lateral chromatic aberration
+// of a lens: no shift at the centre, most at the edges) or a fixed DIRECTION (a prism).
+// Instead of three R/G/B taps we integrate 7 wavelengths from 400–700 nm and weight each by a
+// Gaussian approximation of the R, G, B colour-matching responses, normalized per channel, so
+// a white point stays white and edges spread into smooth rainbows instead of 3 ghost copies.
+#include "glitch_common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+vec3 response(float lambda) {   // rough R/G/B sensitivities (nm)
+    return vec3(exp(-pow((lambda - 605.0) / 50.0, 2.0)),
+                exp(-pow((lambda - 545.0) / 42.0, 2.0)),
+                exp(-pow((lambda - 450.0) / 36.0, 2.0)));
+}
+
+void main() {
+    ivec2 size = imageSize(src);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= size.x || px.y >= size.y) return;
+    vec2 p = vec2(px);
+    float scale = float(size.y) / 1080.0;
+    vec2 dir;
+    if (g.disp.y < 0.5) {
+        dir = (p - 0.5 * vec2(size)) / (0.5 * float(size.y));   // radial: 0 at centre, ~1 at top edge
+    } else {
+        dir = vec2(cos(g.disp.z), sin(g.disp.z));
+    }
+    vec3 acc = vec3(0.0);
+    vec3 wsum = vec3(0.0);
+    const float kn = 1.0 / (1.0 / (400.0 * 400.0) - 1.0 / (700.0 * 700.0));
+    for (int i = 0; i < 7; i++) {
+        float lambda = 400.0 + 50.0 * float(i);
+        float k = (1.0 / (lambda * lambda) - 1.0 / (550.0 * 550.0)) * kn;
+        vec3 w = response(lambda);
+        acc += w * bilinear(p + dir * (k * g.disp.x * scale), size);
+        wsum += w;
+    }
+    imageStore(dst, px, vec4(acc / wsum, 1.0));
+}

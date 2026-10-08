@@ -1,0 +1,30 @@
+#version 450
+// glitch_ring.comp — RING MOD: multiply the picture by a carrier running along the raster.
+//
+// Ring modulation multiplies a signal by an oscillator: y(s) = x(s) * c(s). In the frequency
+// domain a product is a convolution, so every frequency f in the picture is moved to f ± fc
+// (two sidebands) — that is why ring-modded audio sounds metallic and why here fine structure
+// turns into moiré stripes.
+// The carrier runs along the SIGNAL s = y*W + x, at `freq` cycles per scanline:
+//     c(s) = cos(2π·freq·s/W + 2π·speed·t + φ_channel)
+// If freq is not an integer, each new line starts at a different carrier phase, so the stripes
+// lean diagonally — the classic look of an interfering carrier on analog video.
+// Light cannot be negative, so we multiply by mix(1, c, depth) and clamp at 0: depth 1 = true
+// ring mod (negative half-cycles go black), smaller depth = amplitude modulation.
+// Multiplying all three channels by one scalar scales luminance and keeps hue; `chroma` shifts
+// the carrier phase per channel (R −, G 0, B +), splitting the bands into colour fringes.
+#include "glitch_common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 size = imageSize(src);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= size.x || px.y >= size.y) return;
+    // s/W = y + x/W  (signal position measured in lines); use fract to keep precision
+    float lines = float(px.y) + float(px.x) / float(size.x);
+    float ph = 2.0 * PI * (fract(g.ring.y * lines) + fract(g.ring.z * g.misc.x));
+    vec3 carrier = cos(vec3(ph) + g.ring.w * vec3(-1.0, 0.0, 1.0));
+    vec3 m = mix(vec3(1.0), carrier, g.ring.x);
+    vec3 c = imageLoad(src, px).rgb * max(m, vec3(0.0)) ;
+    imageStore(dst, px, vec4(c, 1.0));
+}

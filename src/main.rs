@@ -10,6 +10,7 @@ mod audio;
 mod camera;
 mod capture;
 mod field;
+mod glitch;
 mod gpu;
 mod math4d;
 mod offline;

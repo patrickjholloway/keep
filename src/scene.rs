@@ -83,6 +83,8 @@ pub struct SceneDesc {
     pub beat_rise: f32,
     /// Lua-driven camera; `None` = leave to the interactive controller / default.
     pub camera: Option<Camera>,
+    /// Image-plane glitch patch bay state (resolved per frame by `glitch::resolve`).
+    pub glitch: crate::glitch::GlitchDesc,
 }
 
 impl SceneDesc {

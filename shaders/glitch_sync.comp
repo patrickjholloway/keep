@@ -1,0 +1,48 @@
+#version 450
+// glitch_sync.comp — SYNC SLIP: horizontal tearing as a time delay on the raster signal.
+//
+// Analog video sends the picture as one long 1D signal: line 0 left->right, then line 1, ...
+// Index a pixel by its signal position s = y*W + x. A receiver that loses horizontal sync
+// starts each line a little early or late, i.e. it shows the signal delayed by d(y) samples:
+//     out(s) = in(s - d(y))
+// Because s runs on across line ends, a delay larger than x pulls pixels from the END of the
+// previous line — real wrap-around tearing, not a clamp. d(y) is constant per band of lines:
+//   * blocky tears: bands whose hash exceeds 1 - block jump by a random fraction of a line,
+//     re-rolled `speed` times per second;
+//   * a slow sinusoidal "hsync wobble" on top so the untorn bands still breathe a little.
+// Red and blue get slightly different delays (cheap composite-video colour misregistration).
+#include "glitch_common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+vec3 at_signal(float s, int W, int N) {
+    // fractional signal position -> lerp between the two neighbouring samples
+    float s0 = floor(s);
+    float t = s - s0;
+    int i0 = clamp(int(s0), 0, N - 1);
+    int i1 = clamp(int(s0) + 1, 0, N - 1);
+    vec3 a = imageLoad(src, ivec2(i0 % W, i0 / W)).rgb;
+    vec3 b = imageLoad(src, ivec2(i1 % W, i1 / W)).rgb;
+    return mix(a, b, t);
+}
+
+void main() {
+    ivec2 size = imageSize(src);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= size.x || px.y >= size.y) return;
+    int W = size.x;
+    int N = size.x * size.y;
+    float t = g.misc.x;
+    float yn = float(px.y) / float(size.y);
+    float band = floor(yn * g.sync.y);
+    float tick = floor(t * max(abs(g.sync.z), 0.01));
+    float r = hash21(vec2(band, tick));
+    float tear = step(1.0 - g.sync.w, r) * (hash21(vec2(band * 1.7, tick + 13.0)) * 2.0 - 1.0);
+    float wobble = 0.08 * sin(2.0 * PI * (yn * 2.0 + t * 0.7));
+    float d = g.sync.x * float(W) * (tear + wobble);          // delay in samples
+    float s = float(px.y * W + px.x);
+    vec3 c;
+    c.r = at_signal(s - d * 1.04, W, N).r;
+    c.g = at_signal(s - d, W, N).g;
+    c.b = at_signal(s - d * 0.96, W, N).b;
+    imageStore(dst, px, vec4(c, 1.0));
+}

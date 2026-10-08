@@ -23,6 +23,14 @@ fn main() {
         ("particle.frag", naga::ShaderStage::Fragment),
         ("tonemap.vert", naga::ShaderStage::Vertex),
         ("tonemap.frag", naga::ShaderStage::Fragment),
+        ("glitch_sync.comp", naga::ShaderStage::Compute),
+        ("glitch_ring.comp", naga::ShaderStage::Compute),
+        ("glitch_smear.comp", naga::ShaderStage::Compute),
+        ("glitch_disp.comp", naga::ShaderStage::Compute),
+        ("glitch_warp.comp", naga::ShaderStage::Compute),
+        ("glitch_spectral.comp", naga::ShaderStage::Compute),
+        ("glitch_crush.comp", naga::ShaderStage::Compute),
+        ("glitch_stats.comp", naga::ShaderStage::Compute),
     ] {
         let src = inline_includes(&fs::read_to_string(dir.join(file)).unwrap(), dir);
         let module = naga::front::glsl::Frontend::default()

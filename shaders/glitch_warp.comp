@@ -1,0 +1,33 @@
+#version 450
+// glitch_warp.comp — CONFORMAL WARP: a Möbius transformation of the image plane.
+//
+// Treat each pixel as a complex number z (origin at the frame centre, aspect corrected,
+// Im axis spanning −1..1 over the frame height). A Möbius map
+//     f(z) = (a z + b) / (c z + d),      a, b, c, d ∈ C,  ad − bc ≠ 0
+// is CONFORMAL: it preserves angles locally, so small round beads stay round while the
+// picture as a whole bends; circles map to circles (or lines). Special cases: b = c = 0,
+// d = 1 is a rotation+zoom by a; c ≠ 0 introduces a pole at z = −d/c (stuff rushes off to
+// infinity there) and the inversion that makes the image curl like a lens.
+// We do BACKWARD mapping: for each output pixel w we evaluate the inverse
+//     f⁻¹(w) = (d w − b) / (−c w + a)
+// and sample the input there, so every output pixel gets exactly one value (no holes).
+// The CPU (src/glitch.rs) blends the coefficients with the identity by warp.amount.
+#include "glitch_common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+vec2 cdiv(vec2 a, vec2 b) { return vec2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y) / max(dot(b, b), 1e-12); }
+
+void main() {
+    ivec2 size = imageSize(src);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= size.x || px.y >= size.y) return;
+    vec2 half_size = 0.5 * vec2(size);
+    float unit = 0.5 * float(size.y);
+    vec2 w = (vec2(px) - half_size) / unit * g.warp_m.y;      // output point (zoom scales it)
+    vec2 a = g.warp_ab.xy, b = g.warp_ab.zw, c = g.warp_cd.xy, d = g.warp_cd.zw;
+    vec2 z = cdiv(cmul(d, w) - b, a - cmul(c, w));            // f^-1(w)
+    vec2 q = z * unit + half_size;
+    vec3 col = bilinear(q, size);
+    imageStore(dst, px, vec4(col, 1.0));
+}

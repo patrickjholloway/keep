@@ -1,0 +1,27 @@
+#version 450
+// glitch_crush.comp — BITCRUSH + SAMPLE-AND-HOLD.
+//
+// Sample-and-hold (decimation): the image is sampled only once per hold×hold block and that
+// value is held across the block — the 2D version of lowering an audio sample rate.
+// Bitcrush (quantization): brightness snaps to L levels, the 2D version of lowering bit depth.
+// HDR values are unbounded, so we quantize in a tone-compressed domain v = c/(1+c) ∈ [0,1),
+// round to L levels, then expand back with c = v/(1−v). depth 0..1 maps to L = 2^(8 − 7·depth)
+// (256 levels down to 2): smooth gradients turn into posterized contour bands.
+#include "glitch_common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 size = imageSize(src);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= size.x || px.y >= size.y) return;
+    int hold = max(int(g.crush.y), 1);
+    ivec2 q = min((px / hold) * hold + hold / 2, size - 1);    // block centre: the held sample
+    vec3 c = imageLoad(src, q).rgb;
+    if (g.crush.x > 0.0) {
+        float levels = exp2(8.0 - 7.0 * clamp(g.crush.x, 0.0, 1.0));
+        vec3 v = c / (1.0 + c);
+        v = min(floor(v * levels + 0.5) / levels, vec3(0.98));
+        c = v / (1.0 - v);
+    }
+    imageStore(dst, px, vec4(c, 1.0));
+}

@@ -1,0 +1,118 @@
+#version 450
+// glitch_spectral.comp — SPECTRAL GATE: edit the picture's 2D Fourier spectrum.
+//
+// Any image is a sum of 2D sinusoids (plane waves). The 2D DFT
+//     X[kx,ky] = Σ_x Σ_y x[x,y] · e^{−2πi (kx·x/N + ky·y/M)}
+// gives the amplitude and phase of each one; |k| (radial frequency, cycles/pixel) says how
+// FINE the wave is: low |k| = broad glow and overall shape, high |k| = edges, beads, grain.
+// The gate multiplies a ring-shaped band lo ≤ |k| ≤ hi by (1 − atten), optionally rotates the
+// phases inside the band by random angles (structure at that scale smears into ripples and
+// ghost echoes while its energy is kept), then inverse-transforms.
+//
+// Pipeline (this one shader, selected by pc.p.x = mode; the CPU records the sequence):
+//   0 LOAD       resample the frame onto the 1024×512 working grid (re = rgb, im = 0)
+//   1 STAGE      one radix-2 Stockham butterfly stage along rows or columns (log2 N of them)
+//   2 FILTER     per frequency bin: band gain + phase scramble
+//   3 COMPOSITE  out = orig + mix · (up(filtered) − up(down(orig)))
+//                i.e. only the CHANGE the filter made is added at full resolution, so the
+//                downsampling to the working grid never blurs the untouched picture.
+//
+// Stockham radix-2 (Ns = 1, 2, 4, …, L/2; thread j = 0 .. L/2−1 per line):
+//     k = j mod Ns,  v0 = x[j],  v1 = x[j + L/2] · e^{∓iπ k/Ns}
+//     y[(j−k)·2 + k] = v0 + v1,   y[(j−k)·2 + k + Ns] = v0 − v1
+// Each stage reads one buffer and writes the other ("autosort": the output comes out in
+// natural order with no bit-reversal pass). Forward = rows then columns, inverse = the same
+// with the conjugate twiddle and a 1/(N·M) scale at the end. src/glitch.rs has the CPU twin.
+// We only keep the real part after the inverse: random phases break the Hermitian symmetry a
+// real image's spectrum has, and Re(·) is exactly the symmetric (realizable) half of that edit.
+#include "glitch_common.glsl"
+layout(local_size_x = 256) in;
+
+#define FN 1024u   // working grid width  (power of two)
+#define FM 512u    // working grid height (power of two)
+
+Cplx rd(uint i) {
+    if ((pc.p.z & 4u) != 0u) { return fb[i]; }
+    return fa[i];
+}
+void wr_other(uint i, Cplx v) {          // stage output: the buffer we are NOT reading
+    if ((pc.p.z & 4u) != 0u) { fa[i] = v; } else { fb[i] = v; }
+}
+void wr_same(uint i, Cplx v) {           // in-place filter
+    if ((pc.p.z & 4u) != 0u) { fb[i] = v; } else { fa[i] = v; }
+}
+
+// Frame -> working grid: bilinear sample of the image at grid cell (i, j).
+vec3 down(ivec2 cell, ivec2 size) {
+    cell = clamp(cell, ivec2(0), ivec2(int(FN) - 1, int(FM) - 1));
+    vec2 p = (vec2(cell) + 0.5) * vec2(size) / vec2(FN, FM) - 0.5;
+    return bilinear(clamp(p, vec2(0.0), vec2(size - 1)), size);
+}
+vec3 grid_re(ivec2 cell) {
+    cell = clamp(cell, ivec2(0), ivec2(int(FN) - 1, int(FM) - 1));
+    return rd(uint(cell.y) * FN + uint(cell.x)).re.rgb;
+}
+
+void main() {
+    uint mode = pc.p.x;
+    uint id = gl_GlobalInvocationID.x;
+    ivec2 size = imageSize(src);
+
+    if (mode == 0u) {                                    // LOAD
+        if (id >= FN * FM) return;
+        ivec2 cell = ivec2(int(id % FN), int(id / FN));
+        fa[id] = Cplx(vec4(down(cell, size), 0.0), vec4(0.0));
+    } else if (mode == 1u) {                             // STAGE
+        bool cols = (pc.p.z & 1u) != 0u;
+        float sgn = (pc.p.z & 2u) != 0u ? 1.0 : -1.0;    // forward e^{-i..}, inverse e^{+i..}
+        uint L = cols ? FM : FN;
+        uint half_l = L / 2u;
+        if (id >= half_l * (cols ? FN : FM)) return;
+        uint line = id / half_l;
+        uint j = id % half_l;
+        uint ns = pc.p.y;
+        uint k = j % ns;
+        // element index of position i on this line
+        uint base = cols ? line : line * FN;
+        uint stride = cols ? FN : 1u;
+        Cplx v0 = rd(base + j * stride);
+        Cplx v1 = rd(base + (j + half_l) * stride);
+        float ang = sgn * PI * float(k) / float(ns);
+        vec2 w = vec2(cos(ang), sin(ang));
+        vec3 r1 = v1.re.rgb * w.x - v1.im.rgb * w.y;     // v1 *= w   (complex, per channel)
+        vec3 i1 = v1.re.rgb * w.y + v1.im.rgb * w.x;
+        uint o = (j - k) * 2u + k;
+        wr_other(base + o * stride, Cplx(vec4(v0.re.rgb + r1, 0.0), vec4(v0.im.rgb + i1, 0.0)));
+        wr_other(base + (o + ns) * stride, Cplx(vec4(v0.re.rgb - r1, 0.0), vec4(v0.im.rgb - i1, 0.0)));
+    } else if (mode == 2u) {                             // FILTER
+        if (id >= FN * FM) return;
+        uint kx = id % FN, ky = id / FN;
+        // bins above N/2 are negative frequencies
+        float fx = (kx <= FN / 2u ? float(kx) : float(kx) - float(FN)) / float(FN);
+        float fy = (ky <= FM / 2u ? float(ky) : float(ky) - float(FM)) / float(FM);
+        float f = length(vec2(fx, fy));
+        if (f == 0.0) return;                            // DC (the mean) always passes
+        float soft = g.spec2.z;
+        float band = smoothstep(g.spec.y - soft, g.spec.y + soft, f) * (1.0 - smoothstep(g.spec.z - soft, g.spec.z + soft, f));
+        float gain = band * (1.0 - g.spec.w) + (1.0 - band) * g.spec2.w;
+        float theta = g.spec2.x * band * PI * (2.0 * hash21(vec2(float(kx), float(ky)) + g.spec2.y) - 1.0);
+        vec2 w = gain * vec2(cos(theta), sin(theta));
+        Cplx v = rd(id);
+        wr_same(id, Cplx(vec4(v.re.rgb * w.x - v.im.rgb * w.y, 0.0), vec4(v.re.rgb * w.y + v.im.rgb * w.x, 0.0)));
+    } else {                                             // COMPOSITE (one thread per image pixel)
+        if (id >= uint(size.x * size.y)) return;
+        ivec2 px = ivec2(int(id % uint(size.x)), int(id / uint(size.x)));
+        vec2 u = (vec2(px) + 0.5) * vec2(FN, FM) / vec2(size) - 0.5;   // pixel -> grid coords
+        vec2 fl = floor(u);
+        vec2 t = u - fl;
+        ivec2 c = ivec2(fl);
+        float norm = 1.0 / float(FN * FM);
+        vec3 f00 = grid_re(c) * norm,               d00 = down(c, size);
+        vec3 f10 = grid_re(c + ivec2(1, 0)) * norm, d10 = down(c + ivec2(1, 0), size);
+        vec3 f01 = grid_re(c + ivec2(0, 1)) * norm, d01 = down(c + ivec2(0, 1), size);
+        vec3 f11 = grid_re(c + ivec2(1, 1)) * norm, d11 = down(c + ivec2(1, 1), size);
+        vec3 delta = mix(mix(f00 - d00, f10 - d10, t.x), mix(f01 - d01, f11 - d11, t.x), t.y);
+        vec3 o = max(imageLoad(src, px).rgb + g.spec.x * delta, vec3(0.0));
+        imageStore(dst, px, vec4(o, 1.0));
+    }
+}

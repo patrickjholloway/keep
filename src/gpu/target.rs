@@ -30,6 +30,8 @@ pub trait RenderTarget {
 
 pub struct Offscreen {
     pub hdr: Image,
+    /// Same size/format as `hdr`: the glitch chain ping-pongs between the two.
+    pub scratch: Image,
     pub color: Image,
     /// width*height*4 bytes, HOST_VISIBLE|HOST_COHERENT.
     pub readback: Buffer,
@@ -39,6 +41,7 @@ impl Offscreen {
     pub fn new(ctx: &GpuContext, width: u32, height: u32) -> anyhow::Result<Offscreen> {
         let extent = vk::Extent2D { width, height };
         let hdr = new_hdr(ctx, extent)?;
+        let scratch = new_hdr(ctx, extent)?;
         let color = Image::new_color(ctx, extent, OFFSCREEN_FORMAT, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)?;
         let readback = Buffer::new(
             ctx,
@@ -46,7 +49,7 @@ impl Offscreen {
             vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-        Ok(Offscreen { hdr, color, readback })
+        Ok(Offscreen { hdr, scratch, color, readback })
     }
     /// Record: transition color COLOR_ATTACHMENT -> TRANSFER_SRC, copy to `readback`, and make
     /// the transfer write visible to the host (the fence wait then guarantees it's done).
@@ -77,6 +80,7 @@ impl Offscreen {
     }
     pub fn destroy(&mut self, ctx: &GpuContext) {
         self.hdr.destroy(ctx);
+        self.scratch.destroy(ctx);
         self.color.destroy(ctx);
         self.readback.destroy(ctx);
     }
@@ -97,6 +101,7 @@ pub struct Swapchain {
     pub format: vk::Format,
     pub extent: vk::Extent2D,
     pub hdr: Image,
+    pub scratch: Image,
     /// One "rendering finished" semaphore per swapchain image (present waits on it). Indexed
     /// by image so a semaphore is never re-signalled while its present may still be pending.
     pub render_done: Vec<vk::Semaphore>,
@@ -121,7 +126,7 @@ impl Swapchain {
             surface, surface_loader, loader,
             swapchain: vk::SwapchainKHR::null(), images: vec![], views: vec![],
             format: vk::Format::UNDEFINED, extent: placeholder,
-            hdr: new_hdr(ctx, placeholder)?, render_done: vec![],
+            hdr: new_hdr(ctx, placeholder)?, scratch: new_hdr(ctx, placeholder)?, render_done: vec![],
         };
         sc.recreate(ctx, size.width, size.height)?;
         Ok(sc)
@@ -193,6 +198,8 @@ impl Swapchain {
             self.extent = extent;
             self.hdr.destroy(ctx);
             self.hdr = new_hdr(ctx, extent)?;
+            self.scratch.destroy(ctx);
+            self.scratch = new_hdr(ctx, extent)?;
         }
         Ok(())
     }
@@ -213,6 +220,7 @@ impl Swapchain {
             let _ = ctx.device.device_wait_idle();
             self.destroy_views(ctx);
             self.hdr.destroy(ctx);
+            self.scratch.destroy(ctx);
             self.loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
         }
