@@ -14,7 +14,13 @@ void main() {
     const vec2 corners[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(1,1), vec2(-1,-1), vec2(1,1), vec2(-1,1));
     Droplet dr = droplets[gl_InstanceIndex];
     vec2 c = corners[gl_VertexIndex];
-    float r = dr.pos_size.w;
+    // Per-droplet size jitter (+-50%), seeded by a hash of the instance index so it is stable
+    // from frame to frame (no shimmering). PCG-style integer hash -> [0,1).
+    uint hsh = uint(gl_InstanceIndex) * 747796405u + 2891336453u;
+    hsh = ((hsh >> ((hsh >> 28u) + 4u)) ^ hsh) * 277803737u;
+    hsh = (hsh >> 22u) ^ hsh;
+    float jitter = 0.5 + float(hsh & 0xffffu) / 65535.0;          // 0.5 .. 1.5
+    float r = dr.pos_size.w * jitter;
     // Camera right/up are the first two rows of the view matrix's rotation.
     vec3 right = vec3(scene.view[0][0], scene.view[1][0], scene.view[2][0]);
     vec3 up    = vec3(scene.view[0][1], scene.view[1][1], scene.view[2][1]);

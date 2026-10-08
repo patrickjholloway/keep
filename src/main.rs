@@ -43,7 +43,7 @@ fn parse_render(a: &[String]) -> anyhow::Result<offline::RenderArgs> {
     let script = PathBuf::from(a.first().context("render: missing script path")?);
     let mut r = offline::RenderArgs {
         script, audio: None, seconds: 30.0, fps: 30, width: 1920, height: 1080,
-        out: "out.mp4".into(), particles: 2_000_000,
+        out: "out.mp4".into(), particles: 500_000,
     };
     let mut it = a[1..].iter();
     while let Some(flag) = it.next() {

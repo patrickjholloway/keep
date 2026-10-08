@@ -34,12 +34,23 @@ void main() {
                   field(p4 + vec4(0, h, 0, 0)) - field(p4 - vec4(0, h, 0, 0)),
                   field(p4 + vec4(0, 0, h, 0)) - field(p4 - vec4(0, 0, h, 0)));
     vec3 n = normalize(g + vec3(1e-9));
+    // The 4th gradient component dF/dw says how the surface moves as the slice advances:
+    // dF/dw relative to |grad_xyz| ~ "is this part of the cross-section growing or shrinking in w?"
+    // We tint by it (cyan one way, magenta the other) so 4D depth reads as colour.
+    float gw = field(p4 + vec4(0, 0, 0, h)) - field(p4 - vec4(0, 0, 0, h));
+    float wslope = clamp(gw / (length(g) + abs(gw) + 1e-6), -1.0, 1.0);   // -1..1
 
     float vis = 1.0 - smoothstep(0.0, eps, abs(d));        // 1 on the surface, 0 beyond eps
-    float temp = mix(scene.material.x, scene.material.y, clamp(0.5 + 0.5 * d / eps, 0.0, 1.0));
+    // Interpolate temperature in LOG space with an ease-in, so most of the shell sits at the warm
+    // (orange-red) end and only the outer edge reaches the hot blue-white end. A linear mix put
+    // the bulk at ~6500K, which is just off-white.
+    float sx = clamp(0.5 + 0.5 * d / eps, 0.0, 1.0);
+    float temp = scene.material.x * pow(scene.material.y / scene.material.x, sx * sx);
     Droplet o;
     o.pos_size = vec4(s.xyz, vis > 0.0 ? scene.slice.z * (0.6 + 0.4 * vis) : 0.0);
     o.normal_d = vec4(n, d);
-    o.emission = vec4(blackbody(temp) * scene.material.w, vis);
+    vec3 accent = wslope > 0.0 ? vec3(0.05, 0.85, 1.0) : vec3(1.0, 0.1, 0.75);   // cyan / magenta
+    vec3 col = mix(blackbody(temp), accent, 0.55 * abs(wslope));
+    o.emission = vec4(col * scene.material.w, vis);
     droplets[id] = o;
 }

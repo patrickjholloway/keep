@@ -75,7 +75,7 @@ pub struct Renderer {
     pub field_pass: FieldPass,
     pub particle_pass: ParticlePass,
     pub tonemap: TonemapPass,
-    /// Tonemap knobs: x = exposure, y = vignette. Free to tweak between frames.
+    /// Tonemap knobs: x = exposure, y = vignette, z = time, w = bass (z/w overwritten per frame). Free to tweak between frames.
     pub tonemap_knobs: [f32; 4],
     pub pool: vk::CommandPool,
     pub cmd: vk::CommandBuffer,
@@ -154,6 +154,10 @@ impl Renderer {
             p.counts[0] = self.cloud.count;
         }
         self.scene_ubo.write(std::slice::from_ref(&p));
+        // Tonemap knobs z/w are per-frame: z = time (seeds film grain), w = bass (tints the
+        // background glow). x/y (exposure, vignette) stay whatever the caller set.
+        self.tonemap_knobs[2] = p.slice[3];
+        self.tonemap_knobs[3] = p.audio[0];
         unsafe {
             d.reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())?;
             d.begin_command_buffer(self.cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
