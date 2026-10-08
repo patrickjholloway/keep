@@ -15,6 +15,102 @@
 -- update(t, f): t seconds; f = { bass, mid, high, onset, rms, beat_phase } (all ~0..1)
 
 local H = hyper
+local G = glitch
+
+-- ---------------------------------------------------------------- glitch choreography
+-- The song (src/audio.rs, 122 BPM, 4-beat bars of 240/122 s): intro bars 0-4, groove 4-12,
+-- build 12-20, drop 20-36, then the intro again. Glitches punctuate it:
+--   intro            clean — the 4D form alone, so the contrast lands later
+--   groove           sync-slip tears on strong onsets, prism dispersion on kicks
+--   build            smear (comet trails) and a rising ring-mod carrier grow with the riser;
+--                    the last bar stutters (bitcrush + sample-and-hold on 8th notes)
+--   drop downbeat    Möbius warp + spectral phase scramble that relax over ~2 bars
+--   drop             kicks disperse, every 4 bars the warp swirls back, every 8 bars a
+--                    half-bar bitcrush stutter; bar 28-30 is left clean as a breather
+--   outro            clean again
+local BAR = 240 / 122
+local DROP_T = 20 * BAR
+G.lfo("swirl", "sine", 0.11)        -- slow rotation of the warp's pole
+G.lfo("shimmer", "tri", 0.5)        -- carrier drift during the build
+-- static cables: the patch bay does the multiply-add, the script only shapes envelopes
+G.patch("kick", "dispersion.depth", 1)      -- gains/offsets set per section via glitch.source
+G.patch("tear", "sync.depth", 1)
+G.patch("smear_env", "smear.depth", 1)
+G.patch("mean_luma", "smear.depth", -1.5)   -- envelope follower: bright frames smear less
+G.patch("ring_env", "ring.depth", 1)
+G.patch("drop_env", "warp.amount", 1)
+G.patch("drop_env", "spectral.mix", 1)
+-- swirl LFO adds a little extra twist on top of the base warp (both b and c, see below)
+G.patch("swirl", "warp.b.im", -0.06)
+G.patch("swirl", "warp.c.im", -0.2)
+G.patch("shimmer", "ring.speed", 2)
+G.patch("crush_env", "crush.depth", 1)
+G.set("dispersion.mode", 0)                 -- radial: lens-like chromatic aberration
+G.set("sync.speed", 14)                     -- tears re-roll fast inside a burst
+G.set("smear.dir", 1)
+-- Warp: an ELLIPTIC Möbius map with fixed points ±p. Conjugating a rotation by
+-- g(z) = (z - p)/(z + p) gives, normalized to a = d = 1:
+--   b = -i p tan(θ/2),  c = -i tan(θ/2) / p
+-- so the picture swirls around two still points (a "dipole"). warp.amount blends b, c
+-- toward 0, which is the same as shrinking θ: amount 0.5 = half the twist.
+local P, THETA = 0.55, math.rad(70)   -- centre magnification |f'(0)| = 1 + tan²(θ/2) ≈ 1.5
+local TT = math.tan(THETA / 2)
+G.set("warp.a", 1, 0)
+G.set("warp.b", 0, -P * TT)
+G.set("warp.c", 0, -TT / P)
+G.set("warp.d", 1, 0)
+-- the map magnifies the centre by 1 + tan²(θ/2); zoom the output plane by the same amount
+-- (another cable from the same envelope) so the form keeps its size and only the swirl shows
+G.patch("drop_env", "warp.zoom", TT * TT)
+G.set("spectral.lo", 0.035)
+G.set("spectral.hi", 0.22)
+G.set("spectral.atten", 0.35)
+G.set("spectral.phase", 0.8)
+G.set("spectral.soft", 0.02)
+
+local tear_t, last_tear_onset = -10, 0
+local function choreograph_glitch(t, f, kick)
+  local bar = t / BAR
+  local form = bar % 36
+  local groove = (form >= 4 and form < 12) and 1 or 0
+  local build = (form >= 12 and form < 20) and 1 or 0
+  local drop = (form >= 20) and 1 or 0
+  local breather = (form >= 28 and form < 30) and 1 or 0
+  local active = (groove + build + drop) * (1 - breather)
+
+  -- sync slip: a ~0.15 s burst of tearing on each strong onset (groove + drop, rarer in build)
+  if f.onset > 0.6 and last_tear_onset <= 0.6 then tear_t = t; G.set("sync.freq", 10 + (math.floor(t * 7) % 5) * 9) end
+  last_tear_onset = f.onset
+  local tear = math.exp(-(t - tear_t) / 0.08)
+  G.source("tear", active * tear * (0.05 * groove + 0.02 * build + 0.06 * drop))
+  G.set("sync.block", 0.25 + 0.3 * drop)
+
+  -- dispersion on kicks: pixels of rainbow split at the frame edge
+  G.source("kick", active * kick * (40 * groove + 10 * build + 45 * drop))
+
+  -- build: smear and ring-mod carrier grow with the riser
+  local prog = build * (form - 12) / 8                     -- 0..1 across the build
+  G.source("smear_env", 0.3 * prog * prog + 0.2 * prog)
+  G.set("smear.feedback", 0.9 + 0.065 * prog)
+  G.source("ring_env", 0.55 * prog * prog)
+  G.set("ring.freq", 1.37 + 9 * prog * prog)               -- non-integer: stripes lean
+
+  -- drop downbeat: warp + spectral scramble, relaxing over ~2 bars; every 4 bars a smaller swirl
+  local since_drop = (form - 20) * BAR
+  local big = drop * math.exp(-math.max(since_drop, 0) / (1.2 * BAR))
+  local phrase = (form - 20) % 4
+  local swirl = drop * (1 - breather) * (form >= 24 and 1 or 0) * math.exp(-phrase * BAR / 0.5) * 0.45
+  G.source("drop_env", math.min(1, 0.75 * big + swirl))
+  G.set("spectral.seed", math.floor(t * 122 / 60))          -- new echo direction every beat
+
+  -- bitcrush stutters: last bar of the build on 8th notes, last half-bar of every 8 in the drop
+  local eighth = math.floor(bar * 8) % 2
+  local stutter = 0
+  if form >= 19 and form < 20 then stutter = 1 end
+  if drop == 1 and (form - 20) % 8 >= 7.5 then stutter = 1 end
+  G.source("crush_env", stutter * (0.45 + 0.3 * eighth))
+  G.set("crush.hold", stutter * (eighth == 1 and 14 or 5) + 1)
+end
 
 -- slow sections: 0 = calm intro, 1 = full energy
 local function section(t) return H.ease(H.tri(t + 4, 32)) end
@@ -30,6 +126,7 @@ function update(t, f)
   local dt = math.max(t - last_t, 0); last_t = t
   -- beat envelope: ~150 ms decay assuming ~0.5 s beats (beat_phase runs 0..1 per beat)
   local kick = H.pulse(f.beat_phase, 3.3) * f.bass
+  choreograph_glitch(t, f, kick)
 
   -- bass-triggered slice jumps: each strong onset flips the offset to +-0.15, eased toward it.
   if f.onset > 0.5 and last_onset <= 0.5 then
