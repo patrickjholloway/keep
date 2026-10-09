@@ -1,3 +1,7 @@
+// CPU reference twins of shader math, PNG/debug helpers and Vulkan fields kept for
+// learning are used by tests or not yet wired; keep them without dead-code noise.
+#![allow(dead_code)]
+
 //! keep — 4D implicit-field slice renderer.
 //!
 //!   keep run    scripts/scene.lua [--audio a.flac|.wav|.mp3|.ogg|.m4a | --mic] [--frames N]   (N = exit after N frames; smoke test)
