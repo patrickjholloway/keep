@@ -66,7 +66,7 @@ jobs:
       - name: cargo test (GPU tests skip)
         run: env -u KEEP_VULKAN_LIB cargo test --locked -- --show-output
 
-      # Non-gating: clippy reports 13 warnings at bd67a41, some in src/offline.rs and
+      # Non-gating: clippy reports 14 distinct warnings at bd67a41, some in src/offline.rs and
       # src/gpu/context.rs, which the render-regression work also edits. The lint fixes are a
       # follow-up; drop continue-on-error then.
       - name: cargo clippy -D warnings (non-gating until the warnings are fixed)
