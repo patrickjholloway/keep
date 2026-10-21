@@ -170,8 +170,9 @@ fn adler32(data: &[u8]) -> u32 {
     (s << 16) | a
 }
 
-/// Decode exactly what `png::encode_rgba` writes: 8-bit RGBA, no interlace, one zlib stream of
-/// stored deflate blocks, filter 0 on every row. Anything else is refused, not guessed at.
+/// Decode exactly what `png::encode_rgba` writes: IHDR, IDAT, IEND and nothing after; 8-bit RGBA,
+/// no interlace; one zlib stream of stored deflate blocks; filter 0 on every row. Anything else is
+/// refused, not guessed at.
 fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let rest = bytes
         .strip_prefix(b"\x89PNG\r\n\x1a\n")
@@ -186,16 +187,17 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         if crc32(&rest[pos + 4..pos + 8 + len]) != crc {
             return Err(format!("bad CRC on {}", String::from_utf8_lossy(ty)));
         }
+        // png.rs writes IHDR, then IDAT, then IEND, and nothing after it.
         match ty {
-            b"IHDR" => ihdr = Some(data),
-            b"IDAT" => idat.extend_from_slice(data),
-            b"IEND" => {
+            b"IHDR" if ihdr.is_none() => ihdr = Some(data),
+            b"IDAT" if ihdr.is_some() => idat.extend_from_slice(data),
+            b"IEND" if pos + 12 == rest.len() => {
                 ended = true;
                 break;
             }
             other => {
                 return Err(format!(
-                    "unexpected chunk {}",
+                    "unexpected chunk {} here",
                     String::from_utf8_lossy(other)
                 ))
             }
@@ -221,6 +223,9 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         if head & 0b110 != 0 {
             return Err("compressed deflate block (only stored blocks are read)".into());
         }
+        if head > 1 {
+            return Err("non-zero padding bits in a stored block header".into());
+        }
         let lens = idat.get(p + 1..p + 5).ok_or("truncated stored block")?;
         let len = u16::from_le_bytes([lens[0], lens[1]]);
         if !len != u16::from_le_bytes([lens[2], lens[3]]) {
@@ -236,6 +241,9 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         }
     }
     let sum = idat.get(p..p + 4).ok_or("missing adler32")?;
+    if p + 4 != idat.len() {
+        return Err("bytes after the zlib stream".into());
+    }
     if u32::from_be_bytes(sum.try_into().unwrap()) != adler32(&raw) {
         return Err("adler32 mismatch".into());
     }
@@ -292,6 +300,11 @@ fn render_regression_matches_references() {
     let mut failures = Vec::new();
     for (i, px) in &frames {
         let path = reference_path(*i);
+        let actual = out.join(format!("frame-{i:03}.actual.png"));
+        let diff = out.join(format!("frame-{i:03}.diff.png"));
+        // A failure image left by an earlier run would outlive the fix that made it go away.
+        std::fs::remove_file(&actual).ok();
+        std::fs::remove_file(&diff).ok();
         if !path.exists() {
             failures.push(format!(
                 "frame {i}: no reference at {}; bless with `{BLESS_CMD}`",
@@ -308,8 +321,6 @@ fn render_regression_matches_references() {
         );
         if m.mae > MAE_TOLERANCE || m.differing > DIFFERING_TOLERANCE {
             std::fs::create_dir_all(&out).unwrap();
-            let actual = out.join(format!("frame-{i:03}.actual.png"));
-            let diff = out.join(format!("frame-{i:03}.diff.png"));
             png::write_rgba(&actual, WIDTH, HEIGHT, px).unwrap();
             png::write_rgba(&diff, WIDTH, HEIGHT, &diff_image(px, &reference)).unwrap();
             failures.push(format!(
@@ -409,6 +420,33 @@ fn png_reader_refuses_what_the_writer_never_writes() {
     rgb[9] = 2;
     let e = decode_png(&png_of(&rgb, idat)).unwrap_err();
     assert!(e.contains("RGBA"), "{e}");
+
+    // A second IHDR, and IHDR after IDAT: refused.
+    let mut twice = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut twice, b"IHDR", ihdr);
+    chunk(&mut twice, b"IHDR", ihdr);
+    chunk(&mut twice, b"IDAT", idat);
+    chunk(&mut twice, b"IEND", &[]);
+    let e = decode_png(&twice).unwrap_err();
+    assert!(e.contains("unexpected chunk IHDR"), "{e}");
+
+    // Bytes after IEND: refused.
+    let mut trailing = good.clone();
+    trailing.push(0);
+    let e = decode_png(&trailing).unwrap_err();
+    assert!(e.contains("unexpected chunk IEND"), "{e}");
+
+    // Non-zero padding bits in a stored block's header byte: refused.
+    let mut padded = idat.to_vec();
+    padded[2] |= 0b1000;
+    let e = decode_png(&png_of(ihdr, &padded)).unwrap_err();
+    assert!(e.contains("padding"), "{e}");
+
+    // Bytes after the zlib stream's Adler-32: refused.
+    let mut longer = idat.to_vec();
+    longer.push(0);
+    let e = decode_png(&png_of(ihdr, &longer)).unwrap_err();
+    assert!(e.contains("after the zlib stream"), "{e}");
 
     // One flipped bit in a chunk's CRC: refused.
     let mut bad = good.clone();
