@@ -27,4 +27,6 @@ pub use renderer::Renderer;
 pub mod png;
 
 #[cfg(test)]
+mod regression;
+#[cfg(test)]
 mod tests;

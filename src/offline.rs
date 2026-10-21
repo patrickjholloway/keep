@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use glam::Vec3;
 
-use crate::{audio::{self, TrackSpec}, capture, glitch, gpu::{renderer::CloudSpec, Renderer}, scene::Camera, script::ScriptHost, sonify::Sonifier};
+use crate::{audio::{self, Features, TrackSpec}, capture, glitch, gpu::{renderer::CloudSpec, target::Offscreen, Renderer}, scene::{Camera, SceneDesc}, script::ScriptHost, sonify::Sonifier};
 
 #[derive(Clone, Debug)]
 pub struct RenderArgs {
@@ -67,19 +67,13 @@ pub fn render(args: &RenderArgs) -> anyhow::Result<()> {
     let voice_len = in_frames.max(((frames as f64) * in_rate as f64 / args.fps as f64).ceil() as usize);
     let (mut vl, mut vr) = (vec![0f32; voice_len], vec![0f32; voice_len]);
     let mut voice_used = false;
-    let aspect = args.width as f32 / args.height as f32;
     let started = std::time::Instant::now();
     // Rendering is deterministic: time comes from the frame index, never the wall clock.
     let result = (|| -> anyhow::Result<()> {
         for i in 0..frames {
             let t = i as f32 / args.fps as f32;
             let f = features.get(i).copied().unwrap_or_default();
-            let desc = script.update(t, &f)?;
-            let cam = desc.camera.unwrap_or_else(default_camera);
-            let params = desc.to_params(t, f.as_vec4(), cam, aspect, args.particles);
-            // Glitch patch bay: resolve this frame's cables (mean_luma = the previous frame's).
-            renderer.glitch = glitch::resolve(&desc.glitch, t, &f, renderer.mean_luma(), i as u32);
-            let px = renderer.render_offscreen(&target, &params)?;
+            let (desc, px) = render_frame(&mut script, &mut renderer, &target, t, &f, i)?;
             enc.push_frame(px)?;
             // This frame's surface -> the voice, for exactly this frame's span of samples.
             voice_used |= desc.sonify.enable;
@@ -103,6 +97,29 @@ pub fn render(args: &RenderArgs) -> anyhow::Result<()> {
     std::fs::remove_file(&video_tmp).ok();
     eprintln!("[render] wrote {} in {:.1}s", args.out.display(), started.elapsed().as_secs_f32());
     Ok(())
+}
+
+/// One video frame of `keep render`, shared with the render regression tests (gpu/regression.rs):
+/// script.update(t, f) -> to_params -> glitch::resolve (mean_luma of the frame rendered before
+/// this one, so frames must be rendered in order) -> render_offscreen. Aspect and particle count
+/// come from the target and the renderer's cloud. Returns the frame's scene (the caller's sonify
+/// voice reads it) and its tightly packed RGBA8 pixels.
+pub fn render_frame<'a>(
+    script: &mut ScriptHost,
+    renderer: &mut Renderer,
+    target: &'a Offscreen,
+    t: f32,
+    f: &Features,
+    i: usize,
+) -> anyhow::Result<(SceneDesc, &'a [u8])> {
+    let desc = script.update(t, f)?;
+    let cam = desc.camera.unwrap_or_else(default_camera);
+    let aspect = target.color.extent.width as f32 / target.color.extent.height as f32;
+    let params = desc.to_params(t, f.as_vec4(), cam, aspect, renderer.cloud.count);
+    // Glitch patch bay: resolve this frame's cables (mean_luma = the previous frame's).
+    renderer.glitch = glitch::resolve(&desc.glitch, t, f, renderer.mean_luma(), i as u32);
+    let px = renderer.render_offscreen(target, &params)?;
+    Ok((desc, px))
 }
 
 /// Write the voice stem (`<out>.sonify.wav`) and the music + voice mix (`<out>.mix.wav`, 32-bit
