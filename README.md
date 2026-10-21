@@ -235,7 +235,7 @@ compute passes (`shaders/glitch_*.comp`, recorded by `src/gpu/glitch.rs`) treats
 two ways: as an **analog video signal** — all scanlines concatenated, sample index
 `s = y·W + x` — and as a **2D plane**. The 4D math and the particles are never touched. Each
 module ping-pongs between the HDR image and a scratch image of the same size; a module whose
-depth / mix / amount is 0 records no work at all. Order: sync → ring → smear → dispersion →
+depth / mix / amount is 0 (for crush: depth 0 and hold 1) records no work at all. Order: sync → ring → smear → dispersion →
 warp → spectral → crush. Each shader opens with a longer explanation of its math.
 
 1. **Sync slip** (`glitch_sync.comp`) — horizontal tearing as a *time delay on the signal*:
@@ -255,11 +255,11 @@ warp → spectral → crush. Each shader opens with a longer explanation of its 
    `y[n] = (1 − a)·x[n] + a·y[n−1]`. Impulse response `(1 − a)·aⁿ`: unit DC gain, trail time
    constant `−1/ln a` pixels (a = 0.95 → 20 px, 0.99 → 100 px). Being recursive it is
    inherently serial, so it is one compute thread per row (or column). Only the history above the input is
-   boosted (by `1/√(1−a)`), so flat areas pass unchanged, beads stay crisp and grow comet tails.
+   boosted (by `1/√(1−a)`, capped at 8), so flat areas pass unchanged, beads stay crisp and grow comet tails.
 4. **Dispersion** (`glitch_disp.comp`) — a prism: refractive index follows Cauchy's
    `n(λ) ≈ A + B/λ²`, so the displacement is `k(λ) = (1/λ² − 1/550²)/(1/400² − 1/700²)` times
    `depth` along either the radial direction (lateral chromatic aberration: nothing at the
-   centre, most at the edges) or a fixed angle. Wavelengths 400–700 nm are sampled evenly in
+   centre, most around the silhouette at ~0.45 of the half-height) or a fixed angle. Wavelengths 400–700 nm are sampled evenly in
    displacement (7 to 64 taps, enough to keep neighbouring taps ≤ 1.5 px apart), jittered per
    pixel, and weighted by Gaussian R/G/B responses (normalized per channel, so white stays white): edges
    spread into continuous rainbows rather than three ghost copies.
@@ -309,7 +309,7 @@ in a half-bar stutter; bars 28–30 are a clean breather, and the outro is clean
 
 Read `src/gpu/` in this order:
 
-- `context.rs` — instance creation with `VK_KHR_portability_enumeration` (needed for MoltenVK),
+- `context.rs` — instance creation (`VK_KHR_portability_enumeration` only when offered: MoltenVK loaded directly does not list it),
   physical device pick, logical device with `portability_subset`, queue.
 - `buffers.rs` — Vulkan's object-vs-memory split: create a buffer/image, query requirements,
   pick a memory type, bind. Host-visible uniforms vs device-local storage buffers.
@@ -347,8 +347,6 @@ by `src/glitch.rs`); `tonemap.frag` does bloom, hue-preserving tonemapping, grad
 - The climax shapes are still fairly rounded blobs rather than crisply faceted forms.
 - The sonification voice has only been checked by measurement (levels, spectrum, pitch classes),
   not by ear in every section; the mapping constants are a first pass.
-- The glitch chain is not audio-reactive in `keep run` (live mode has no audio input yet), but
-  LFOs, `mean_luma` and script sources work there.
 - MoltenVK only has been tested (Apple GPU); other Vulkan drivers should work but are untried.
 
 ## License

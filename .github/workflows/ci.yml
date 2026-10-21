@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token: nothing here writes to the repository or needs credentials.
+permissions:
+  contents: read
+
+# A newer push to the same pull request cancels the superseded run. Pushes to main get a group
+# per commit, so every commit on main is checked.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: build, test, clippy, fmt (macOS)
+    # Pinned image rather than macos-latest, so an image migration never changes the build
+    # unannounced. macos-26 is Apple silicon (arm64), like the machines keep is developed on.
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Rust 1.90 with rustfmt and clippy, as mise.toml pins it. The MoltenVK and ffmpeg entries
+      # of mise.toml are deliberately not installed here (see the test step).
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90 (branch 1.90 -> rust 1.90.0)
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.90-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.90-
+
+      # Non-gating: the tree is not rustfmt-clean yet (388 hunks across 25 files at bd67a41).
+      # A repository-wide `cargo fmt` would collide with the render-regression work in src/
+      # landing at the same time, so the reformat is a follow-up; drop continue-on-error then.
+      - name: cargo fmt --check (non-gating until the tree is reformatted)
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - run: cargo build --locked
+
+      # The GPU tests do not run in CI. ash dlopens MoltenVK from $KEEP_VULKAN_LIB at run time,
+      # and whether a hosted macOS VM exposes a usable Metal device is not something CI should
+      # depend on. MoltenVK is never installed here and KEEP_VULKAN_LIB is removed from the
+      # environment, so have_gpu() (src/gpu/tests.rs) is false and the four GPU tests print
+      # their skip line (where they have one) and pass. ffmpeg is not installed either, so
+      # audio::tests::decodes_flac_via_ffmpeg skips as well. --show-output keeps the skip
+      # lines in the log.
+      - name: cargo test (GPU tests skip)
+        run: env -u KEEP_VULKAN_LIB cargo test --locked -- --show-output
+
+      # Non-gating: clippy reports 14 distinct warnings at bd67a41, some in src/offline.rs and
+      # src/gpu/context.rs, which the render-regression work also edits. The lint fixes are a
+      # follow-up; drop continue-on-error then.
+      - name: cargo clippy -D warnings (non-gating until the warnings are fixed)
+        continue-on-error: true
+        run: cargo clippy --locked --all-targets -- -D warnings
