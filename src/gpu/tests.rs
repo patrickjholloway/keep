@@ -8,9 +8,9 @@ use crate::scene::{GpuPrimitive, SceneParams, MAX_PRIMS};
 
 /// GPU tests run one at a time: several MoltenVK devices created concurrently by the parallel
 /// test harness is not something we need to support.
-static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn have_gpu() -> bool {
+pub(super) fn have_gpu() -> bool {
     std::env::var("KEEP_VULKAN_LIB").map(|p| std::path::Path::new(&p).exists()).unwrap_or(false)
 }
 

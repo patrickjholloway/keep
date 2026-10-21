@@ -28,3 +28,5 @@ pub mod png;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod regression;
