@@ -104,7 +104,14 @@ pub fn render(args: &RenderArgs) -> anyhow::Result<()> {
 /// this one, so frames must be rendered in order) -> render_offscreen. Aspect and particle count
 /// come from the target and the renderer's cloud. Returns the frame's scene (the caller's sonify
 /// voice reads it) and its tightly packed RGBA8 pixels.
-pub fn render_frame<'a>(script: &mut ScriptHost, renderer: &mut Renderer, target: &'a Offscreen, t: f32, f: &Features, i: usize) -> anyhow::Result<(SceneDesc, &'a [u8])> {
+pub fn render_frame<'a>(
+    script: &mut ScriptHost,
+    renderer: &mut Renderer,
+    target: &'a Offscreen,
+    t: f32,
+    f: &Features,
+    i: usize,
+) -> anyhow::Result<(SceneDesc, &'a [u8])> {
     let desc = script.update(t, f)?;
     let cam = desc.camera.unwrap_or_else(default_camera);
     let aspect = target.color.extent.width as f32 / target.color.extent.height as f32;
