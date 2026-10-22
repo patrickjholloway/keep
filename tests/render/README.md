@@ -39,8 +39,8 @@ same frames, in one process and across separate `cargo test` runs, are byte-iden
 floor 0), so on this machine one pixel more than 8 levels off is a changed picture, not noise.
 
 - The pixel check catches small, local changes. Swapping the dispersion module's `angle` and
-  `min` parameters moves 1, 3 and 1 pixels (frames 0, 45, 90) by up to 15, 31 and 17 levels
-  at a mean error of only 0.0009–0.0013. The earlier tolerance (0.1% of pixels, ~57 per
+  `min` parameters puts 1, 3 and 1 pixels (frames 0, 45, 90) over 8 levels (max 15, 31 and
+  17) at a mean error of only 0.0009–0.0013. The earlier tolerance (0.1% of pixels, ~57 per
   frame) let that through.
 - The mean error catches broad, faint changes. Doubling the tonemap's grain moves every pixel
   by at most 1 level and is caught only by the mean: 0.2786–0.2802 against 0.25, a 1.1×
