@@ -5,12 +5,13 @@
 //! * Inputs are fixed: features are a function of the frame index (no audio), the particle cloud
 //!   is `keep render`'s (seed 1), 320×180, frames rendered in order from t = 0 at 30 fps (a frame
 //!   reads the previous frame's mean luminance, so frames cannot be rendered out of order).
-//! * Comparison, per reference frame, in 8-bit levels over R, G, B and A: the mean absolute error
-//!   and the fraction of pixels whose largest channel difference exceeds `PIXEL_LEVELS`; either
-//!   over its tolerance fails. `tests/render/README.md` has the numbers behind the tolerances.
+//! * Comparison, per reference frame, in 8-bit levels over R, G, B and A: the number of pixels
+//!   whose largest channel difference exceeds `PIXEL_LEVELS` (8), which must be 0, and the mean
+//!   absolute error, which must be ≤ `MAE_TOLERANCE` (0.25); either over its tolerance fails.
+//!   `tests/render/README.md` has the numbers behind the tolerances.
 //! * On failure the actual frame and an amplified diff are written to
-//!   `target/render-regression/` (gitignored) and the message names the frame, both metric
-//!   values, the tolerances and those paths.
+//!   `target/render-regression/` (gitignored) and the message names the frame, every metric
+//!   value, the tolerances and those paths.
 //! * A frame must also be lit (`LIT_BAND`), checked before any comparison and before a bless,
 //!   so an all-black render can never become a reference.
 //! * Bless: `KEEP_BLESS=1 mise exec -- cargo test render_regression` rewrites the references,
@@ -18,8 +19,10 @@
 //! * Without MoltenVK (`KEEP_VULKAN_LIB` unset or pointing at a missing file) the GPU tests
 //!   print `skipping: …` and pass, like the other GPU tests.
 //!
-//! References are blessed on one machine (an Apple GPU through MoltenVK); see the README for
-//! what the tolerance does and does not cover.
+//! References are per-machine: blessed on an Apple M5 Pro through MoltenVK 1.4.2, where two
+//! renders of a frame are byte-identical. On another GPU, driver, macOS or MoltenVK version the
+//! test is expected to fail; re-bless there and look at the diff and actual frames before
+//! committing. The README says what the comparison does and does not catch.
 use std::path::{Path, PathBuf};
 
 use super::{png, renderer::CloudSpec, tests::have_gpu, tests::GPU_LOCK, Renderer};
@@ -37,8 +40,9 @@ const FRAMES: [usize; 3] = [0, 45, 90];
 const MAE_TOLERANCE: f64 = 0.25;
 /// A pixel "differs" when its largest channel difference exceeds this many 8-bit levels.
 const PIXEL_LEVELS: u8 = 8;
-/// Largest fraction of differing pixels a frame may have.
-const DIFFERING_TOLERANCE: f64 = 0.001;
+/// Most differing pixels a frame may have: none. Two renders on the blessing machine are
+/// byte-identical, so one pixel over `PIXEL_LEVELS` is a changed picture, not noise.
+const DIFFERING_TOLERANCE: usize = 0;
 /// Fraction of lit pixels (R+G+B > `LIT_SUM`) every compared frame must have. Not the other GPU
 /// tests' 60: the tonemap's background glow alone puts ~15% of this frame's pixels over 60, so
 /// a frame with no form at all would pass; it stays under 150.
@@ -108,8 +112,8 @@ fn lit_fraction(px: &[u8]) -> f32 {
 struct Metric {
     /// Mean absolute error over all channels, 8-bit levels.
     mae: f64,
-    /// Fraction of pixels whose largest channel difference exceeds `PIXEL_LEVELS`.
-    differing: f64,
+    /// Number of pixels whose largest channel difference exceeds `PIXEL_LEVELS`.
+    differing: usize,
     /// Largest single channel difference.
     max: u8,
 }
@@ -131,9 +135,18 @@ fn compare(a: &[u8], b: &[u8]) -> Metric {
     }
     Metric {
         mae: sum as f64 / a.len() as f64,
-        differing: differing as f64 / (a.len() / 4) as f64,
+        differing,
         max,
     }
+}
+
+/// Fraction of a `WIDTH`×`HEIGHT` frame's pixels that differ.
+fn differing_fraction(m: &Metric) -> f64 {
+    m.differing as f64 / (WIDTH * HEIGHT) as f64
+}
+
+fn fails(m: &Metric) -> bool {
+    m.mae > MAE_TOLERANCE || m.differing > DIFFERING_TOLERANCE
 }
 
 /// |a − b| per colour channel, amplified ×8 so small drift is visible; alpha opaque.
@@ -315,20 +328,25 @@ fn render_regression_matches_references() {
         let reference = read_reference(&path).unwrap_or_else(|e| panic!("frame {i}: {e}"));
         let m = compare(px, &reference);
         eprintln!(
-            "render_regression: frame {i} mae {:.4} (tolerance {MAE_TOLERANCE}) differing {:.5} \
-             (tolerance {DIFFERING_TOLERANCE}, >{PIXEL_LEVELS} levels) max {}",
-            m.mae, m.differing, m.max
+            "render_regression: frame {i} mae {:.4} (tolerance {MAE_TOLERANCE}) differing {} px \
+             {:.5} (tolerance {DIFFERING_TOLERANCE} px, >{PIXEL_LEVELS} levels) max {}",
+            m.mae,
+            m.differing,
+            differing_fraction(&m),
+            m.max
         );
-        if m.mae > MAE_TOLERANCE || m.differing > DIFFERING_TOLERANCE {
+        if fails(&m) {
             std::fs::create_dir_all(&out).unwrap();
             png::write_rgba(&actual, WIDTH, HEIGHT, px).unwrap();
             png::write_rgba(&diff, WIDTH, HEIGHT, &diff_image(px, &reference)).unwrap();
             failures.push(format!(
-                "frame {i}: mae {:.4} (tolerance {MAE_TOLERANCE}), differing pixels {:.5} \
-                 (tolerance {DIFFERING_TOLERANCE}), max channel diff {}; actual {}, diff {}; \
+                "frame {i}: mae {:.4} (tolerance {MAE_TOLERANCE}), differing pixels {} \
+                 ({:.5} of the frame; tolerance {DIFFERING_TOLERANCE}, >{PIXEL_LEVELS} levels), \
+                 max channel diff {}; actual {}, diff {}; \
                  if the change is intended, re-bless with `{BLESS_CMD}`",
                 m.mae,
                 m.differing,
+                differing_fraction(&m),
                 m.max,
                 actual.display(),
                 diff.display()
@@ -360,6 +378,31 @@ fn render_is_deterministic() {
         );
         assert_eq!(bytes, 0, "frame {i}: two identical renders differ ({m:?})");
     }
+}
+
+#[test]
+fn one_pixel_over_pixel_levels_fails_the_frame() {
+    let reference = vec![100u8; (WIDTH * HEIGHT * 4) as usize];
+    let mut px = reference.clone();
+    // One channel of one pixel off by exactly `PIXEL_LEVELS`: within the tolerance.
+    px[4 * 1000 + 1] += PIXEL_LEVELS;
+    let m = compare(&px, &reference);
+    assert_eq!((m.differing, m.max), (0, PIXEL_LEVELS));
+    assert!(!fails(&m), "{m:?}");
+    // One level more, one pixel of 57,600: the frame fails although its MAE is ~0.00004.
+    px[4 * 1000 + 1] += 1;
+    let m = compare(&px, &reference);
+    assert_eq!(m.differing, 1);
+    assert!(m.mae < MAE_TOLERANCE && fails(&m), "{m:?}");
+    // R, G and B of every pixel off by one level: no pixel over `PIXEL_LEVELS`, but MAE 0.75.
+    let all: Vec<u8> = reference
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| if k % 4 == 3 { v } else { v + 1 })
+        .collect();
+    let m = compare(&all, &reference);
+    assert_eq!((m.differing, m.max), (0, 1));
+    assert!(fails(&m), "{m:?}");
 }
 
 /// Wrap one chunk the way png.rs does (length, type, data, CRC).
