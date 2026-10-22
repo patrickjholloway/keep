@@ -14,7 +14,7 @@ Rendering is Vulkan (via `ash` on MoltenVK), shaders are GLSL compiled to SPIR-V
 ```sh
 mise install                          # rust, ffmpeg, MoltenVK; sets KEEP_VULKAN_LIB
 mise exec -- cargo build --release
-mise exec -- cargo test               # 46 tests (GPU tests skip if no Vulkan)
+mise exec -- cargo test               # 51 tests (GPU tests skip if no Vulkan)
 
 # live window with music, hot-reloads the script on save. Without --audio it plays the
 # exemplar track (synthesized to out/keep-exemplar.wav on first run, 75 s, looped).
@@ -25,8 +25,8 @@ mise exec -- ./target/release/keep run scripts/exemplar.lua --mic
 # --audio accepts WAV, FLAC, MP3, OGG/Vorbis and M4A/AAC (decoded in-process by symphonia;
 # analysis uses a mono mixdown, playback keeps stereo and resamples to the device rate).
 # Only a missing .wav path is synthesized; any other missing or unknown file is an error.
-# offline render (synthesizes <out>.wav if --audio is missing or absent; ffmpeg muxes the
-# original --audio file as AAC)
+# offline render (without --audio it uses <out>.wav; with --audio a.wav it uses a.wav; that
+# .wav is synthesized if it does not exist; ffmpeg muxes the original --audio file as AAC)
 mise exec -- ./target/release/keep render scripts/exemplar.lua \
     --seconds 75 --fps 60 --size 1920x1080 --out out/keep-exemplar.mp4 [--audio a.wav] [--particles 750000]
 ```

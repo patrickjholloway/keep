@@ -59,8 +59,9 @@ jobs:
       # The GPU tests do not run in CI. ash dlopens MoltenVK from $KEEP_VULKAN_LIB at run time,
       # and whether a hosted macOS VM exposes a usable Metal device is not something CI should
       # depend on. MoltenVK is never installed here and KEEP_VULKAN_LIB is removed from the
-      # environment, so have_gpu() (src/gpu/tests.rs) is false and the four GPU tests print
-      # their skip line (where they have one) and pass. ffmpeg is not installed either, so
+      # environment, so have_gpu() (src/gpu/tests.rs) is false and the six GPU tests return
+      # early and pass: five print a skip line, gpu::tests::surface_descriptor_reads_the_slice
+      # returns without one. ffmpeg is not installed either, so
       # audio::tests::decodes_flac_via_ffmpeg skips as well. --show-output keeps the skip
       # lines in the log.
       - name: cargo test (GPU tests skip)
