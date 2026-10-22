@@ -51,9 +51,11 @@ floor 0), so on this machine one pixel more than 8 levels off is a changed pictu
 
 What it does not cover: a change that keeps every pixel within 8 levels and the mean under
 0.25 is let through. For example, moving the ring modulator's default chroma from 0.6 to
-0.5 rad changes these frames by a mean of 0.02 levels (max 5) and passes. In the other
-direction there is no headroom for float error: a ±1-level change over the whole frame, such
-as a grain hash that rounds differently, already exceeds the mean-error tolerance.
+0.5 rad changes these frames by a mean of 0.02 levels (max 5) and passes, and so do small
+global grade changes (vignette 0.35 → 0.30, or background blue 0.14 → 0.13: mean about 0.13,
+max 1–2). In the other direction there is little headroom for float error: a 1-level change
+on most pixels, such as a grain hash that rounds differently (mean 0.28), already exceeds the
+mean-error tolerance.
 
 **The references are per-machine.** They were blessed on an Apple M5 Pro through MoltenVK
 1.4.2. On another GPU, driver, macOS or MoltenVK version the test is expected to fail. To move
